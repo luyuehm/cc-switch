@@ -98,7 +98,7 @@ curl -s "https://<YOUR_CPA_PROXY>/v1/models" \
   -H "Authorization: Bearer <YOUR_API_KEY>"
 ```
 
-Set `<YOUR_CPA_PROXY>` to your model gateway (e.g. `your-cpa-proxy.example.com`, `api.openai.com`, any litellm proxy).
+Set `<YOUR_CPA_PROXY>` to your model gateway (e.g. `your-proxy.example.com`, `api.openai.com`, any litellm proxy).
 
 If you don't use CPA detection, just use `/switch --offline` — it works entirely from your local `availableModels` list.
 
