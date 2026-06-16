@@ -135,8 +135,18 @@ function global:cc-sync {
     <#
     .SYNOPSIS
         Fetch available models from CPA endpoint and sync to local availableModels.
+    .PARAMETER List
+        Show full model list from CPA (no sync).
+    .PARAMETER Force
+        Auto-add new models without confirmation.
+    .PARAMETER Remove
+        Remove models that no longer exist on CPA from local list.
     #>
-    param([switch]$Force)
+    param(
+        [switch]$List,
+        [switch]$Force,
+        [switch]$Remove
+    )
 
     # Determine CPA models URL
     $cpaUrl = if ($env:CPA_MODELS_URL) {
@@ -189,6 +199,16 @@ function global:cc-sync {
         return
     }
 
+    # -List mode: just show the full model list, no sync
+    if ($List) {
+        Write-Host ""
+        Write-Host "=== CPA Models ($($cpaModels.Count)) ===" -ForegroundColor Cyan
+        $cpaModels | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+        Write-Host ""
+        Write-Host "--- $(cpaModels.Count) models ---" -ForegroundColor Gray
+        return
+    }
+
     $json = Get-CCSettings
     if (-not $json) { return }
 
@@ -205,6 +225,38 @@ function global:cc-sync {
     }
     if ($goneModels.Count -gt 0) {
         Write-Host "  Gone      : -$($goneModels.Count) (removed from CPA)" -ForegroundColor Yellow
+    }
+
+    # Always show CPA model list with category grouping
+    Write-Host ""
+    Write-Host "=== CPA Model List ===" -ForegroundColor Cyan
+
+    # Detect prefix categories
+    $categories = $cpaModels | Sort-Object | Group-Object -Property {
+        if ($_ -imatch "^(gpt|o\d)") { "OpenAI" }
+        elseif ($_ -imatch "^claude|^sonnet|^haiku") { "Anthropic" }
+        elseif ($_ -imatch "^deepseek") { "DeepSeek" }
+        elseif ($_ -imatch "^qwen") { "Qwen/Alibaba" }
+        elseif ($_ -imatch "^grok") { "Grok/xAI" }
+        elseif ($_ -imatch "^llama") { "Meta/Llama" }
+        elseif ($_ -imatch "^mistral|^mixtral") { "Mistral" }
+        elseif ($_ -imatch "^gemin") { "Google/Gemini" }
+        elseif ($_ -imatch "^kimi|^moonshot") { "Moonshot/Kimi" }
+        elseif ($_ -imatch "step") { "Stepfun" }
+        else { "Other" }
+    }
+
+    $categories | Sort-Object Name | ForEach-Object {
+        Write-Host "  [$($_.Name)]" -ForegroundColor Magenta
+        $_.Group | ForEach-Object { Write-Host "    $_" -ForegroundColor Gray }
+    }
+
+    Write-Host ""
+    Write-Host "Press Enter to continue, or type 'q' to cancel sync" -ForegroundColor Yellow -NoNewline
+    $choice = Read-Host
+    if ($choice -eq "q") {
+        Write-Host "Sync cancelled." -ForegroundColor Gray
+        return
     }
 
     if ($newModels.Count -gt 0) {
@@ -235,12 +287,25 @@ function global:cc-sync {
         Write-Host ""
         Write-Host "Models removed from CPA (still in local):" -ForegroundColor Yellow
         $goneModels | Sort-Object | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
-        Write-Host "Use '/switch --remove <name>' to clean up." -ForegroundColor Gray
+
+        if ($Remove) {
+            $cleaned = @($local | Where-Object { $_ -in $cpaModels })
+            $json.availableModels = $cleaned | Sort-Object -Unique
+            Save-CCSettings $json
+            Write-Host "Cleaned: $($local.Count) -> $($cleaned.Count) models" -ForegroundColor Green
+        } else {
+            Write-Host "To remove: cc-sync -Remove" -ForegroundColor Gray
+        }
     }
 
     if ($newModels.Count -eq 0 -and $goneModels.Count -eq 0) {
         Write-Host "  Status: fully in sync" -ForegroundColor Green
     }
+
+    Write-Host ""
+    Write-Host "Tip: cc-sync -List     — show full model list only" -ForegroundColor Gray
+    Write-Host "Tip: cc-sync -Force    — auto-add new models" -ForegroundColor Gray
+    Write-Host "Tip: cc-sync -Remove   — remove obsolete models" -ForegroundColor Gray
 }
 
 # ===========================================================================
@@ -583,7 +648,10 @@ function Show-CCMenu {
     Write-Host "  cc <model>         Switch and launch" -ForegroundColor White
     Write-Host "  cc                 This menu" -ForegroundColor White
     Write-Host "  cc-status          Full model inventory" -ForegroundColor White
-    Write-Host "  cc-sync            Sync models from CPA endpoint" -ForegroundColor White
+    Write-Host "  cc-sync            Sync models from CPA" -ForegroundColor White
+    Write-Host "    cc-sync -List    Show full CPA model list" -ForegroundColor Gray
+    Write-Host "    cc-sync -Force   Auto-add new models" -ForegroundColor Gray
+    Write-Host "    cc-sync -Remove  Remove obsolete models" -ForegroundColor Gray
     Write-Host ""
     Write-Host "  cc-audit           Audit skill visibility" -ForegroundColor White
     Write-Host "  cc-hide <skill>    Hide skill or plugin" -ForegroundColor White
