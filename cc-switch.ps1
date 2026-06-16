@@ -1,4 +1,3 @@
-<function>
 # cc-switch.ps1 — Claude Code Model Switcher for PowerShell
 # Dot-source: . .\cc-switch.ps1   or add to $PROFILE
 # https://github.com/luyuehm/cc-switch
