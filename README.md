@@ -18,6 +18,8 @@
 irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex
 ```
 
+Install will ask if you want pwsh terminal enhancements (Oh My Posh theme, file icons, smart cd) — say Y for a full oh-my-zsh-like experience. Skip for minimal install.
+
 ### Configure Secrets
 
 Edit `~/.claude/cc-switch.env`:
@@ -27,6 +29,14 @@ ANTHROPIC_API_KEY=your-api-key-here
 ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 # Optional: separate endpoint for model list
 # CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
+```
+
+### Manual Install
+
+```powershell
+# Or from local checkout:
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+. .\install.ps1
 ```
 
 ### Usage
@@ -110,7 +120,7 @@ Integrates cc-menu functionality:
 
 | File | Contains | Git? |
 |------|----------|------|
-| `.env.example` | Placeholders | ✅ Yes |
+| `.env.example` | Placeholders | [OK]  Yes |
 | `~/.claude/cc-switch.env` | Real API key + CPA URL | ❌ No (`.gitignore`) |
 
 ---

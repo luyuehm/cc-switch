@@ -22,7 +22,7 @@ def json_merge(key, value):
 
 
 def cmd_audit():
-    print("📋 Claude Code 菜单审计报告\n")
+    print(" Claude Code 菜单审计报告\n")
 
     print("━━ 自定义斜杠命令 (commands/) ━━━━")
     if COMMANDSDIR.exists():
@@ -33,7 +33,7 @@ def cmd_audit():
                 if line.startswith("description:"):
                     desc = line.split(":", 1)[1].strip().strip('"')
                     break
-            print(f"  ✅ /{name} — {desc or '无描述'}")
+            print(f"  [OK]  /{name} — {desc or '无描述'}")
     print()
 
     print("━━ 隐藏的技能 (skillOverrides) ━━━━")
@@ -44,7 +44,7 @@ def cmd_audit():
             print("  (无)")
         else:
             for k, v in ov.items():
-                print(f"  🔇 {k} → {v}")
+                print(f"  [HIDDEN]  {k} → {v}")
     else:
         print("  (无)")
     print()
@@ -76,10 +76,10 @@ def cmd_hide(name):
     if ":" in name and name.endswith("*"):
         plugin = name.split(":")[0]
         ov[f"{plugin}:*"] = "off"
-        print(f"🔇 隐藏插件 {plugin} 的全部技能")
+        print(f"[HIDDEN]  隐藏插件 {plugin} 的全部技能")
     else:
         ov[name] = "off"
-        print(f"🔇 隐藏技能: {name}")
+        print(f"[HIDDEN]  隐藏技能: {name}")
 
     SETTINGS.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
 
@@ -89,7 +89,7 @@ def cmd_show(name):
         sys.exit("Usage: cc-menu.sh show <skill-name|plugin:*>")
 
     if not SETTINGS.exists():
-        print("⚠️ settings.json 不存在")
+        print("[!]  settings.json 不存在")
         return
 
     cfg = json.loads(SETTINGS.read_text())
@@ -102,15 +102,15 @@ def cmd_show(name):
             del ov[k]
         cfg["skillOverrides"] = ov
         SETTINGS.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        print(f"✅ 恢复插件 {plugin} 的全部技能 ({len(keys)} 项)")
+        print(f"[OK]  恢复插件 {plugin} 的全部技能 ({len(keys)} 项)")
     else:
         if name in ov:
             del ov[name]
             cfg["skillOverrides"] = ov
             SETTINGS.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-            print(f"✅ 恢复显示: {name}")
+            print(f"[OK]  恢复显示: {name}")
         else:
-            print(f"⚠️ {name} 未被隐藏，无需恢复")
+            print(f"[!]  {name} 未被隐藏，无需恢复")
 
 
 def cmd_command(action, name, *args):
@@ -126,17 +126,17 @@ def cmd_command(action, name, *args):
             content += f"argument-hint: {hint}\n"
         content += "---\n\n"
         filepath.write_text(content)
-        print(f"✅ 创建自定义命令 /{name} → {filepath}")
+        print(f"[OK]  创建自定义命令 /{name} → {filepath}")
 
     elif action == "remove":
         filepath = COMMANDSDIR / f"{name}.md"
         if not filepath.exists():
             sys.exit(f"命令 /{name} 不存在")
         filepath.unlink()
-        print(f"✅ 删除自定义命令 /{name}")
+        print(f"[OK]  删除自定义命令 /{name}")
 
     elif action == "list":
-        print("📋 自定义斜杠命令列表:")
+        print(" 自定义斜杠命令列表:")
         if COMMANDSDIR.exists():
             for f in sorted(COMMANDSDIR.glob("*.md")):
                 desc = ""
@@ -151,15 +151,15 @@ def cmd_command(action, name, *args):
 
 def cmd_config():
     if not SETTINGS.exists():
-        print("⚠️ settings.json 不存在")
+        print("[!]  settings.json 不存在")
         return
     cfg = json.loads(SETTINGS.read_text())
     ov = cfg.get("skillOverrides", {})
     if ov:
-        print("📋 当前 skillOverrides 配置:")
+        print(" 当前 skillOverrides 配置:")
         print(json.dumps(ov, indent=2, ensure_ascii=False))
     else:
-        print("📋 当前未配置 skillOverrides")
+        print(" 当前未配置 skillOverrides")
 
 
 def cmd_profile(profile="default"):
@@ -167,7 +167,7 @@ def cmd_profile(profile="default"):
         cfg = json.loads(SETTINGS.read_text()) if SETTINGS.exists() else {}
         cfg.pop("skillOverrides", None)
         SETTINGS.write_text(json.dumps(cfg, indent=2, ensure_ascii=False))
-        print("✅ 切换到 default 预设: 所有技能可见")
+        print("[OK]  切换到 default 预设: 所有技能可见")
 
     elif profile == "minimal":
         json_merge("skillOverrides", {
@@ -177,7 +177,7 @@ def cmd_profile(profile="default"):
             "pitch-agent:*": "user-invocable-only",
             "claude-api:*": "name-only",
         })
-        print("✅ 切换到 minimal 预设: 隐藏文档/示例技能，金融/投行技能仅菜单可见")
+        print("[OK]  切换到 minimal 预设: 隐藏文档/示例技能，金融/投行技能仅菜单可见")
 
     elif profile == "dev":
         json_merge("skillOverrides", {
@@ -187,7 +187,7 @@ def cmd_profile(profile="default"):
             "pitch-agent:*": "off",
             "claude-api:claude-api": "user-invocable-only",
         })
-        print("✅ 切换到 dev 预设: 仅保留开发相关技能")
+        print("[OK]  切换到 dev 预设: 仅保留开发相关技能")
 
     elif profile == "custom":
         print("📝 自定义模式: 请手动编辑 ~/.claude/settings.json 中的 skillOverrides")

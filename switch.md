@@ -32,9 +32,9 @@ curl -s "$CPA_MODELS_URL" \
 4. **Compare with local**: Load `availableModels` from `C:\Users\admin\.claude\settings.json`.
 
 5. **Classify**:
-   - CPA models NOT in `availableModels` → 🆕 NEW (available to add)
-   - Models in `availableModels` NOT in CPA → ⚠️ DEPRECATED (may not work)
-   - Models in both → ✅ active
+   - CPA models NOT in `availableModels` → [NEW]  NEW (available to add)
+   - Models in `availableModels` NOT in CPA → [!]  DEPRECATED (may not work)
+   - Models in both → [OK]  active
 
 6. **Cache result**: Save comparison to `C:\Users\admin\.claude\.cpa-cache.json`.
 
@@ -44,8 +44,8 @@ Show models in groups:
 
 ```
 === CPA Detection Summary ===
-🆕 New: <count> models available
-⚠️  Deprecated: <count> models may not work
+[NEW]  New: <count> models available
+[!]   Deprecated: <count> models may not work
 💾 Cache saved
 
 === Available Models (73) ===

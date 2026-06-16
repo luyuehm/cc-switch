@@ -317,13 +317,13 @@ function global:cc-audit {
     .SYNOPSIS
         Audit current Claude Code skill visibility and custom commands.
     #>
-    Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host "  Claude Code Menu Audit Report" -ForegroundColor Cyan
-    Write-Host "═══════════════════════════════════════════════" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
     Write-Host ""
 
     # Custom commands
-    Write-Host "━━ Custom Slash Commands (commands/) ━━━━" -ForegroundColor White
+    Write-Host "== Custom Slash Commands (commands/) ====" -ForegroundColor White
     $commandsDir = "$env:USERPROFILE\.claude\commands"
     if (Test-Path $commandsDir) {
         $cmds = Get-ChildItem "$commandsDir\*.md" -ErrorAction SilentlyContinue | Sort-Object Name
@@ -339,7 +339,7 @@ function global:cc-audit {
                         break
                     }
                 }
-                Write-Host "  ✅ /$($f.BaseName) — $($desc)" -ForegroundColor Green
+                Write-Host "  [OK]  /$($f.BaseName) — $($desc)" -ForegroundColor Green
             }
         }
     } else {
@@ -348,14 +348,14 @@ function global:cc-audit {
     Write-Host ""
 
     # Hidden skills
-    Write-Host "━━ Hidden Skills (skillOverrides) ━━━━" -ForegroundColor White
+    Write-Host "== Hidden Skills (skillOverrides) ====" -ForegroundColor White
     $json = Get-CCSettings
     if ($json -and $json.skillOverrides) {
         if ($json.skillOverrides.Count -eq 0) {
             Write-Host "  (none)" -ForegroundColor Gray
         } else {
             foreach ($kvp in $json.skillOverrides.GetEnumerator()) {
-                Write-Host "  🔇 $($kvp.Key) → $($kvp.Value)" -ForegroundColor Yellow
+                Write-Host "  [HIDDEN]  $($kvp.Key) → $($kvp.Value)" -ForegroundColor Yellow
             }
         }
     } else {
@@ -364,7 +364,7 @@ function global:cc-audit {
     Write-Host ""
 
     # Plugin skills
-    Write-Host "━━ Plugin Skills (enabledPlugins) ━━━━" -ForegroundColor White
+    Write-Host "== Plugin Skills (enabledPlugins) ====" -ForegroundColor White
     if ($json -and $json.enabledPlugins) {
         $ov = $json.skillOverrides
         foreach ($plugin in $json.enabledPlugins.PSObject.Properties) {
@@ -373,7 +373,7 @@ function global:cc-audit {
                     $_ -like "$($plugin.Name):*" -and $ov.$_ -eq "off"
                 }).Count
                 $status = if ($hidden -gt 0) { "$hidden hidden" } else { "all visible" }
-                Write-Host "  📦 $($plugin.Name): $status" -ForegroundColor Cyan
+                Write-Host "  [PACKAGE]  $($plugin.Name): $status" -ForegroundColor Cyan
             }
         }
     } else {
@@ -413,10 +413,10 @@ function global:cc-hide {
         $plugin = $Name.Split(":")[0]
         $propertyName = $plugin + ":*"
         $json.skillOverrides | Add-Member -NotePropertyName $propertyName -NotePropertyValue "off" -Force
-        Write-Host "🔇 Hiding plugin: $plugin (all skills)" -ForegroundColor Yellow
+        Write-Host "[HIDDEN]  Hiding plugin: $plugin (all skills)" -ForegroundColor Yellow
     } else {
         $json.skillOverrides | Add-Member -NotePropertyName $Name -NotePropertyValue "off" -Force
-        Write-Host "🔇 Hiding skill: $Name" -ForegroundColor Yellow
+        Write-Host "[HIDDEN]  Hiding skill: $Name" -ForegroundColor Yellow
     }
 
     Save-CCSettings $json
@@ -438,7 +438,7 @@ function global:cc-show {
 
     $json = Get-CCSettings
     if (-not $json -or -not $json.skillOverrides) {
-        Write-Host "⚠️  No skillOverrides configured." -ForegroundColor Yellow
+        Write-Host "[!]   No skillOverrides configured." -ForegroundColor Yellow
         return
     }
 
@@ -450,14 +450,14 @@ function global:cc-show {
             $json.skillOverrides.PSObject.Properties.Remove($k) | Out-Null
         }
         Save-CCSettings $json
-        Write-Host "✅ Restored plugin: $plugin ($count items)" -ForegroundColor Green
+        Write-Host "[OK]  Restored plugin: $plugin ($count items)" -ForegroundColor Green
     } else {
         if ($json.skillOverrides.PSObject.Properties.Name -contains $Name) {
             $json.skillOverrides.PSObject.Properties.Remove($Name) | Out-Null
             Save-CCSettings $json
-            Write-Host "✅ Restored: $Name" -ForegroundColor Green
+            Write-Host "[OK]  Restored: $Name" -ForegroundColor Green
         } else {
-            Write-Host "⚠️  $Name is not hidden." -ForegroundColor Yellow
+            Write-Host "[!]   $Name is not hidden." -ForegroundColor Yellow
         }
     }
 }
@@ -483,7 +483,7 @@ function global:cc-profile {
     if ($Name -eq "default") {
         $json.PSObject.Properties.Remove("skillOverrides")
         Save-CCSettings $json
-        Write-Host "✅ Switched to 'default' profile: all skills visible" -ForegroundColor Green
+        Write-Host "[OK]  Switched to 'default' profile: all skills visible" -ForegroundColor Green
     }
     elseif ($Name -eq "minimal") {
         $json.skillOverrides = [PSCustomObject]@{
@@ -494,7 +494,7 @@ function global:cc-profile {
             "claude-api:*" = "name-only"
         }
         Save-CCSettings $json
-        Write-Host "✅ Switched to 'minimal' profile: hidden docs/examples, financial/pitch menu-only" -ForegroundColor Green
+        Write-Host "[OK]  Switched to 'minimal' profile: hidden docs/examples, financial/pitch menu-only" -ForegroundColor Green
     }
     elseif ($Name -eq "dev") {
         $json.skillOverrides = [PSCustomObject]@{
@@ -505,10 +505,10 @@ function global:cc-profile {
             "claude-api:claude-api" = "user-invocable-only"
         }
         Save-CCSettings $json
-        Write-Host "✅ Switched to 'dev' profile: dev skills only" -ForegroundColor Green
+        Write-Host "[OK]  Switched to 'dev' profile: dev skills only" -ForegroundColor Green
     }
     elseif ($Name -eq "custom") {
-        Write-Host "📝 Custom profile: edit ~/.claude/settings.json skillOverrides manually" -ForegroundColor Cyan
+        Write-Host "[NOTE]  Custom profile: edit ~/.claude/settings.json skillOverrides manually" -ForegroundColor Cyan
     }
 }
 
@@ -533,7 +533,7 @@ function global:cc-commands {
     $commandsDir = "$env:USERPROFILE\.claude\commands"
 
     if ($Action -eq "list") {
-        Write-Host "📋 Custom Slash Commands:" -ForegroundColor Cyan
+        Write-Host "[LIST]  Custom Slash Commands:" -ForegroundColor Cyan
         if (Test-Path $commandsDir) {
             $cmds = Get-ChildItem "$commandsDir\*.md" -ErrorAction SilentlyContinue | Sort-Object Name
             if ($cmds.Count -eq 0) {
@@ -564,12 +564,12 @@ function global:cc-commands {
         New-Item -ItemType Directory -Force -Path $commandsDir | Out-Null
         $filepath = Join-Path $commandsDir "$Name.md"
         if (Test-Path $filepath) {
-            Write-Host "⚠️  /$Name already exists" -ForegroundColor Yellow
+            Write-Host "[!]   /$Name already exists" -ForegroundColor Yellow
             return
         }
         $content = "---`ndescription: $Description`n---`n`n"
         Set-Content -Path $filepath -Value $content
-        Write-Host "✅ Created /$Name → $filepath" -ForegroundColor Green
+        Write-Host "[OK]  Created /$Name → $filepath" -ForegroundColor Green
     }
     elseif ($Action -eq "remove") {
         if (-not $Name) {
@@ -579,9 +579,9 @@ function global:cc-commands {
         $filepath = Join-Path $commandsDir "$Name.md"
         if (Test-Path $filepath) {
             Remove-Item $filepath -Force
-            Write-Host "✅ Deleted /$Name" -ForegroundColor Green
+            Write-Host "[OK]  Deleted /$Name" -ForegroundColor Green
         } else {
-            Write-Host "⚠️  /$Name not found" -ForegroundColor Yellow
+            Write-Host "[!]   /$Name not found" -ForegroundColor Yellow
         }
     }
 }

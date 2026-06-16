@@ -135,21 +135,21 @@ def main():
     idx = 1
     
     if qwen_series:
-        model_list_str += "\n### 🏮 Qwen (通义千问系列)\n"
+        model_list_str += "\n###  Qwen (通义千问系列)\n"
         for m in qwen_series:
             desc = "当前默认模型，推理与编码核心担当。" if "nvfp4" in m.lower() else "阿里通义千问系列模型。"
             model_list_str += f"[{idx}] {m} -> {desc}\n"
             idx += 1
             
     if gpt_series:
-        model_list_str += "\n### 🤖 GPT / OpenAI 系列\n"
+        model_list_str += "\n### [AI]  GPT / OpenAI 系列\n"
         for m in gpt_series:
             desc = "旗舰级推理模型，适合超高难度算法。" if "5.5" in m else "高性能日常通用模型。"
             model_list_str += f"[{idx}] {m} -> {desc}\n"
             idx += 1
             
     if claude_series:
-        model_list_str += "\n### 🦅 Claude / Anthropic 系列\n"
+        model_list_str += "\n###  Claude / Anthropic 系列\n"
         for m in claude_series:
             model_list_str += f"[{idx}] {m} -> 官方原厂 Claude 模型接口。\n"
             idx += 1
@@ -177,7 +177,7 @@ def main():
     models_file_path = claudedir / "commands" / "models.md"
     if models_file_path.exists():
         content = models_file_path.read_text(encoding="utf-8")
-        pattern = r"(### 📋 CPA 平台可用模型列表\n)(.*?)(\n### 🚀 快捷切换指令)"
+        pattern = r"(###  CPA 平台可用模型列表\n)(.*?)(\n###  快捷切换指令)"
         new_content = re.sub(pattern, rf"\1{model_list_str}\3", content, flags=re.DOTALL)
         models_file_path.write_text(new_content, encoding="utf-8")
         print(f"Successfully updated {models_file_path} with verified models!")
@@ -186,7 +186,7 @@ def main():
     obsidian_file_path = Path("D:/obsidian-vault/03_Resources/04_技术文档/Claude Code - CPA 多模型驱动与本地消息清洗中间件配置手册.md")
     if obsidian_file_path.exists():
         content = obsidian_file_path.read_text(encoding="utf-8")
-        pattern = r"(### 📋 CPA 平台可用模型列表\n)(.*?)(\n### 🚀 快捷切换指令)"
+        pattern = r"(###  CPA 平台可用模型列表\n)(.*?)(\n###  快捷切换指令)"
         new_content = re.sub(pattern, rf"\1{model_list_str}\3", content, flags=re.DOTALL)
         obsidian_file_path.write_text(new_content, encoding="utf-8")
         print(f"Successfully updated Obsidian manual at {obsidian_file_path}!")
