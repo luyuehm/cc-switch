@@ -1,154 +1,120 @@
 # install.ps1 — cc-switch one-click installer
-# Sets up: model switching functions, OAuth bypass, slash command
+# Sets up: model switching, OAuth bypass, skill menu management, slash commands
 # Run: .\install.ps1
 # Web: irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex
 
-param(
-    [switch]$Force,
-    [switch]$DryRun,
-    [switch]$NoProfile,
-    [switch]$NoSwitchMd
-)
+param([switch]$SkipProfile)
 
-$ErrorActionPreference = "Stop"
+Write-Host ""
+Write-Host " ═══════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "   cc-switch — Claude Code Model + Menu Manager" -ForegroundColor Cyan
+Write-Host " ═══════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host ""
+
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-Write-Host ""
-Write-Host "=== cc-switch Installer ===" -ForegroundColor Cyan
-Write-Host "  Installs model switching + OAuth login bypass" -ForegroundColor Gray
-Write-Host ""
+# [1/5] Copy cc-switch.ps1 to ~/.claude/
+Write-Host "[1/5] Installing core script to ~/.claude/cc-switch.ps1..." -ForegroundColor Yellow
+if (-not (Test-Path "$env:USERPROFILE\.claude")) {
+    New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude" | Out-Null
+}
+Copy-Item "$scriptDir\cc-switch.ps1" "$env:USERPROFILE\.claude\cc-switch.ps1" -Force
+Write-Host "  ✅ Core script installed" -ForegroundColor Green
 
-# === [1/4] Copy cc-switch.ps1 to ~/.claude/ ===
-Write-Host "[1/4] Installing cc-switch.ps1..." -ForegroundColor Yellow
-$ccSwitchSrc = Join-Path $scriptDir "cc-switch.ps1"
-$ccSwitchDst = "$env:USERPROFILE\.claude\cc-switch.ps1"
-
-if (Test-Path $ccSwitchSrc) {
-    if (-not $DryRun) {
-        Copy-Item $ccSwitchSrc $ccSwitchDst -Force
-        Write-Host "  Copied to $ccSwitchDst" -ForegroundColor Green
-    }
+# [2/5] Copy cc-menu Python scripts (optional advanced features)
+Write-Host ""
+Write-Host "[2/5] Installing cc-menu skill management (optional advanced features)..." -ForegroundColor Yellow
+$skillsDir = "$env:USERPROFILE\.claude\skills\cc-menu"
+if (Test-Path $skillsDir) {
+    Write-Host "  ℹ️  cc-menu skills already exist, skipping..." -ForegroundColor Gray
 } else {
-    Write-Host "  ERROR: cc-switch.ps1 not found at $ccSwitchSrc" -ForegroundColor Red
-    exit 1
+    if (Test-Path "$scriptDir\skills\cc-menu") {
+        Copy-Item "$scriptDir\skills\cc-menu" $skillsDir -Recurse -Force
+        Write-Host "  ✅ cc-menu skills installed to $skillsDir" -ForegroundColor Green
+    } else {
+        Write-Host "  ⚠️  cc-menu skills not found (optional, skipped)" -ForegroundColor Yellow
+    }
 }
 
-# === [2/4] Setup cc-switch.env (secrets, NOT committed to git) ===
-Write-Host "[2/4] Setting up cc-switch.env..." -ForegroundColor Yellow
-$envExample = Join-Path $scriptDir ".env.example"
+# [3/5] Set up .env for secrets
+Write-Host ""
+Write-Host "[3/5] Setting up cc-switch.env for secrets..." -ForegroundColor Yellow
+$envExample = "$scriptDir\.env.example"
 $envTarget = "$env:USERPROFILE\.claude\cc-switch.env"
-
-if (Test-Path $envTarget) {
-    Write-Host "  Already exists: $envTarget" -ForegroundColor Gray
-} elseif (Test-Path $envExample) {
-    if (-not $DryRun) {
+if (-not (Test-Path $envTarget)) {
+    if (Test-Path $envExample) {
         Copy-Item $envExample $envTarget
-        Write-Host "  Created $envTarget (from .env.example)" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "  >>> EDIT THIS FILE NOW with your credentials: <<<" -ForegroundColor Yellow
-        Write-Host "      notepad $envTarget" -ForegroundColor White
-        Write-Host ""
+        Write-Host "  Created: $envTarget" -ForegroundColor Green
+        Write-Host "  ✏️  Edit this file to set your:" -ForegroundColor Yellow
+        Write-Host "      ANTHROPIC_API_KEY" -ForegroundColor Gray
+        Write-Host "      ANTHROPIC_BASE_URL (or CPA_MODELS_URL)" -ForegroundColor Gray
+    } else {
+        Write-Host "  ⚠️  .env.example not found" -ForegroundColor Yellow
     }
 } else {
-    # If running via irm | iex (no local .env.example), create from scratch
-    if (-not $DryRun) {
-        @"
-# cc-switch secrets — NEVER commit this file
-ANTHROPIC_API_KEY=your-api-key-here
-ANTHROPIC_BASE_URL=https://your-proxy.example.com
-CPA_MODELS_URL=https://your-proxy.example.com/v1/models
-"@ | Set-Content $envTarget -Encoding UTF8
-        Write-Host "  Created $envTarget (fill in your credentials)" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "  >>> EDIT THIS FILE NOW: <<<" -ForegroundColor Yellow
-        Write-Host "      notepad $envTarget" -ForegroundColor White
-        Write-Host ""
-    }
+    Write-Host "  ℹ️  cc-switch.env already exists, skipping..." -ForegroundColor Gray
 }
 
-# === [3/4] Inject into pwsh $PROFILE ===
-if (-not $NoProfile) {
-    Write-Host "[3/4] Updating PowerShell profile..." -ForegroundColor Yellow
+# [4/5] Update PowerShell profile
+Write-Host ""
+Write-Host "[4/5] Configuring PowerShell profile..." -ForegroundColor Yellow
+$profilePath = $PROFILE.CurrentUserAllHosts
+$profileDir = Split-Path -Parent $profilePath
+if (-not (Test-Path $profileDir)) {
+    New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+}
 
-    $profilePath = $PROFILE
-    $profileDir = Split-Path $profilePath -Parent
-    if (-not (Test-Path $profileDir)) {
-        New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
-    }
-
-    $marker = "# >>> cc-switch (auto-generated by install.ps1)"
-    $endMarker = "# <<< cc-switch"
-
-    $profileBlock = @"
-
-$marker
-# cc-switch — model switching + OAuth bypass
+$ccBlock = @'
+# >>> cc-switch — Claude Code Model + Menu Manager
 # https://github.com/luyuehm/cc-switch
 if (Test-Path "$env:USERPROFILE\.claude\cc-switch.ps1") {
     . "$env:USERPROFILE\.claude\cc-switch.ps1"
 } else {
-    Write-Host "[cc-switch] Not installed. Clone: git clone https://github.com/luyuehm/cc-switch.git; cd cc-switch; .\install.ps1" -ForegroundColor Yellow
+    Write-Host "[cc-switch] Not installed. Run: irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex" -ForegroundColor Yellow
 }
-$endMarker
-"@
+# <<< cc-switch
+'@
 
-    if (Test-Path $profilePath) {
-        $existing = Get-Content $profilePath -Raw
-        if ($existing -match [regex]::Escape($marker)) {
-            if ($Force) {
-                # Remove old block, append new one
-                $cleaned = $existing -replace "(?s)$marker.*?$endMarker", ""
-                $cleaned + "`r`n$profileBlock" | Set-Content $profilePath -Encoding UTF8
-                Write-Host "  Replaced existing cc-switch block." -ForegroundColor Green
-            } else {
-                Write-Host "  Profile already has cc-switch block. Use -Force to overwrite." -ForegroundColor Gray
-            }
-        } else {
-            if (-not $DryRun) {
-                Add-Content $profilePath "`r`n$profileBlock"
-                Write-Host "  Appended to $profilePath" -ForegroundColor Green
-            }
-        }
+if (Test-Path $profilePath) {
+    $content = Get-Content $profilePath -Raw
+    if ($content -notlike "*cc-switch*") {
+        Add-Content -Path $profilePath -Value "`n$ccBlock"
+        Write-Host "  ✅ Appended to: $profilePath" -ForegroundColor Green
     } else {
-        if (-not $DryRun) {
-            $profileBlock | Set-Content $profilePath -Encoding UTF8
-            Write-Host "  Created $profilePath" -ForegroundColor Green
-        }
+        Write-Host "  ℹ️  cc-switch already in profile, skipping..." -ForegroundColor Gray
     }
+} else {
+    Set-Content -Path $profilePath -Value $ccBlock
+    Write-Host "  ✅ Created: $profilePath" -ForegroundColor Green
 }
 
-# === [4/4] Copy switch.md to Claude Code commands ===
-if (-not $NoSwitchMd) {
-    Write-Host "[4/4] Installing /switch slash command..." -ForegroundColor Yellow
-    $switchMdSrc = Join-Path $scriptDir "switch.md"
-    $switchMdDst = "$env:USERPROFILE\.claude\commands\switch.md"
-
-    if (Test-Path $switchMdSrc) {
-        if (-not $DryRun) {
-            $cmdDir = Split-Path $switchMdDst -Parent
-            if (-not (Test-Path $cmdDir)) {
-                New-Item -ItemType Directory -Path $cmdDir -Force | Out-Null
-            }
-            Copy-Item $switchMdSrc $switchMdDst -Force
-            Write-Host "  Copied to $switchMdDst" -ForegroundColor Green
-        }
-    } else {
-        Write-Host "  switch.md not found, skipping." -ForegroundColor Gray
-    }
+# [5/5] Copy cc-switch.ps1 to D:/vscode project for development
+Write-Host ""
+Write-Host "[5/5] Linking to D:/vscode/cc-switch for development..." -ForegroundColor Yellow
+if (Test-Path "$scriptDir\cc-switch.ps1") {
+    # Already in the project, just confirm
+    Write-Host "  ℹ️  Script location: $scriptDir" -ForegroundColor Gray
+} else {
+    Write-Host "  ℹ️  Running from: $scriptDir" -ForegroundColor Gray
 }
 
 Write-Host ""
-Write-Host "=== Installation Complete ===" -ForegroundColor Green
+Write-Host " ═══════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "   Installation Complete!" -ForegroundColor Green
+Write-Host " ═══════════════════════════════════════════════" -ForegroundColor Green
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
-Write-Host "  1. Edit your .env file:" -ForegroundColor White
-Write-Host "     notepad `$env:USERPROFILE\.claude\cc-switch.env" -ForegroundColor Gray
+Write-Host "  1. Edit ~/.claude/cc-switch.env with your API key and CPA URL" -ForegroundColor White
+Write-Host "  2. Reload profile: . `$PROFILE" -ForegroundColor White
+Write-Host "  3. Try: cc gpt-5.5    (switch model + launch)" -ForegroundColor White
+Write-Host "          cc            (show menu)" -ForegroundColor White
+Write-Host "          cc-audit      (audit skill visibility)" -ForegroundColor White
+Write-Host "          cc-profile minimal   (hide docs/examples)" -ForegroundColor White
 Write-Host ""
-Write-Host "  2. Reload profile:" -ForegroundColor White
-Write-Host "     . `$PROFILE" -ForegroundColor Gray
-Write-Host ""
-Write-Host "  3. Try it:" -ForegroundColor White
-Write-Host "     cc                # show menu" -ForegroundColor Gray
-Write-Host "     cc gpt-5.5        # switch model + launch Claude Code" -ForegroundColor Gray
-Write-Host "     cc-status         # model inventory" -ForegroundColor Gray
-Write-Host ""
+
+if (-not $SkipProfile) {
+    Write-Host "Reloading profile now..." -ForegroundColor Yellow
+    . $profilePath
+    Write-Host ""
+    Write-Host "Tip: Run 'cc' to see the full menu" -ForegroundColor Cyan
+}

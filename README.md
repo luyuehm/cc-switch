@@ -1,123 +1,191 @@
-# cc-switch — Claude Code Model Switcher for PowerShell
+# cc-switch — Claude Code Model + Menu Manager
 
-Zero-friction model switching for Claude Code on Windows. Switch models before launch, bypass OAuth login, all from your pwsh terminal.
+**One-stop solution for Claude Code CLI:**
+- **Model Switching**: Switch AI models + OAuth bypass (no login)
+- **Skill Menu Management**: Audit, hide/show, preset profiles
+- **CPA Sync**: Auto-fetch available models from your CPA proxy
+- **Secret Management**: `.env` based API key config
 
-## Features
+*100% PowerShell — works on Windows, macOS, Linux*
 
-- **Pre-launch switching** — change model THEN start Claude Code, one command
-- **OAuth bypass** — injects API key via env vars, no browser login needed
-- **Shorthand aliases** — `cc-pro`, `cc-fast`, `cc-default` for common models
-- **Status dashboard** — `cc-status` shows grouped model inventory with current marker
-- **CPA-aware** — `/switch` slash command syncs with cliproxyapi endpoint
-- **Offline mode** — `/switch --offline` works from local cache only
+---
 
-## Quick Install
+## Quick Start
+
+### One-line Install
 
 ```powershell
 irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex
 ```
 
-Or manual:
+### Configure Secrets
 
-```powershell
-git clone https://github.com/luyuehm/cc-switch.git
-cd cc-switch
-.\install.ps1
+Edit `~/.claude/cc-switch.env`:
+
+```bash
+ANTHROPIC_API_KEY=your-api-key-here
+ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
+# Optional: separate endpoint for model list
+# CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 ```
 
-## Usage
+### Usage
 
 ```powershell
-# Reload profile after install (or restart pwsh)
+# Reload profile
 . $PROFILE
 
-# Switch model and launch Claude Code
+# Switch model + launch Claude Code
 cc gpt-5.5
 
-# Show current model and available shortcuts
+# Show menu
 cc
-
-# Show full grouped model inventory
-cc-status
 
 # Quick shortcuts
 cc-pro         # claude-opus-4-7
 cc-fast        # deepseek-v4-flash
 cc-default     # gpt-5.5
 
-# Sync model list from CPA endpoint
-cc-sync        # fetch CPA models, show diff, add new ones
-cc-sync -Force # auto-add without confirmation
+# Sync models from CPA
+cc-sync        # fetch and diff
+cc-sync -Force # auto-add new models
+
+# Skill menu management
+cc-audit           # audit visibility
+cc-hide docx       # hide a skill
+cc-hide document-skills:*  # hide entire plugin
+cc-show docx       # restore
+cc-profile minimal # switch to minimal preset
+cc-commands        # list custom commands
 ```
 
-## Claude Code Slash Command
+---
 
-Copy `switch.md` to your Claude Code commands directory:
+## Features
+
+### 1. Model Switching + OAuth Bypass
+
+No more login prompts — launches directly with API key auth:
 
 ```powershell
-cp switch.md $env:USERPROFILE\.claude\commands\
+cc claude-sonnet-4
+cc deepseek-v4-flash
+cc gpt-5.5
 ```
 
-Then inside Claude Code:
+### 2. CPA Model Sync
 
+Automatically fetch available models from your CPA proxy:
+
+```powershell
+cc-sync
+# Shows: CPA total, Local count, New models (+N), Gone models (-N)
+# Confirms before adding new ones (use -Force to auto-add)
 ```
-/switch                  # list models with CPA detection
-/switch gpt-5.5          # switch to GPT-5.5
-/switch --offline        # list from local cache only
-/switch --status         # CPA detection summary only
-```
 
-## Requirements
+### 3. Skill Menu Management
 
-- PowerShell 7+ (pwsh)
-- Claude Code CLI installed (any version)
-- API key configured in `~/.claude/settings.json`
+Integrates cc-menu functionality:
+
+| Command | Description |
+|---------|-------------|
+| `cc-audit` | Full report: custom commands, hidden skills, plugins |
+| `cc-hide <skill>` | Hide skill (e.g., `docx`, `document-skills:*`) |
+| `cc-show <skill>` | Restore hidden skill |
+| `cc-profile <name>` | Switch preset: `default`, `minimal`, `dev`, `custom` |
+| `cc-commands list` | List custom `/` commands |
+| `cc-commands create <name> <desc>` | Create new custom command |
+| `cc-commands remove <name>` | Delete custom command |
+
+**Presets:**
+
+| Profile | Effect |
+|---------|--------|
+| `default` | All skills visible |
+| `minimal` | Hide docs/examples, financial/pitch menu-only |
+| `dev` | Dev skills only, rest hidden |
+| `custom` | Manual edit `settings.json` |
+
+### 4. Secret Management via `.env`
+
+| File | Contains | Git? |
+|------|----------|------|
+| `.env.example` | Placeholders | ✅ Yes |
+| `~/.claude/cc-switch.env` | Real API key + CPA URL | ❌ No (`.gitignore`) |
+
+---
 
 ## Configuration
 
-cc-switch reads model list and credentials from your Claude Code `settings.json`. Two endpoints matter:
-
-### 1. Model API endpoint (`ANTHROPIC_BASE_URL`)
-
-Your Claude Code's `settings.json` must have:
-
-```json
-{
-  "env": {
-    "ANTHROPIC_API_KEY": "your-api-key",
-    "ANTHROPIC_BASE_URL": "https://your-cpa-proxy.example.com"
-  }
-}
-```
-
-This is the endpoint Claude Code calls for inference. Point it to your CPA proxy or any OpenAI-compatible API.
-
-### 2. CPA model detection endpoint (`switch.md`)
-
-The `/switch` slash command optionally queries a CPA `/v1/models` endpoint to discover available models dynamically. Edit `switch.md` after install:
+### `~/.claude/cc-switch.env`
 
 ```bash
-# In switch.md, Step 0, replace:
-curl -s "https://<YOUR_CPA_PROXY>/v1/models" \
-  -H "Authorization: Bearer <YOUR_API_KEY>"
+# Required: API key for auth
+ANTHROPIC_API_KEY=sk-ant-xxx
+
+# Required: Model inference endpoint (CPA proxy or direct API)
+ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
+
+# Optional: Separate endpoint for model list (defaults to BASE_URL/v1/models)
+# CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 ```
 
-Set `<YOUR_CPA_PROXY>` to your model gateway (e.g. `your-proxy.example.com`, `api.openai.com`, any litellm proxy).
+### `settings.json` (auto-managed by cc-switch)
 
-If you don't use CPA detection, just use `/switch --offline` — it works entirely from your local `availableModels` list.
+cc-switch reads/writes `~/.claude/settings.json`:
 
-### Adding models to your local list
+- `env.ANTHROPIC_MODEL`: Current model
+- `env.ANTHROPIC_API_KEY`: Fallback if `.env` not set
+- `env.ANTHROPIC_BASE_URL`: Fallback if `.env` not set
+- `availableModels`: Local model list (synced via `cc-sync`)
+- `skillOverrides`: Hidden skills (managed by `cc-hide`/`cc-profile`)
 
-Edit `~/.claude/settings.json` and add model names to the `availableModels` array. cc-switch validates model names against this list before switching.
+---
 
-## Files
+## Advanced: CPA Cleaner Proxy (Optional)
 
-| File | Purpose |
-|------|---------|
-| `cc-switch.ps1` | Standalone script, dot-source to load functions |
-| `install.ps1` | Copies profile functions and switch.md to correct locations |
-| `switch.md` | Claude Code `/switch` slash command |
-| `Microsoft.PowerShell_profile.ps1` | Reference: full profile entry (what install.ps1 writes) |
+cc-switch includes cc-menu's CPA Cleaner for advanced routing:
+
+```powershell
+# Start local proxy (port 8317)
+cc-menu cleaner start
+
+# Set in ~/.claude/cc-switch.env
+ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+
+# Test and register models
+cc-menu cleaner test
+```
+
+See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
+
+---
+
+## Project Structure
+
+```
+cc-switch/
+├── cc-switch.ps1          # Core: model switch + menu management
+├── install.ps1            # One-click installer
+├── .env.example           # Secret template
+├── README.md
+└── skills/cc-menu/        # Optional: advanced CPA Cleaner
+    ├── bin/
+    │   ├── cc-menu.sh
+    │   ├── proxy_cpa_cleaner.py
+    │   └── test_and_register_models.py
+    └── docs/
+        └── CPA-MultiModel-Cleaner-Guide.md
+```
+
+---
+
+## Related
+
+- **cc-menu original**: https://github.com/luyuehm/cc-menu (now integrated)
+- **Hermes Agent**: https://hermes-agent.nousresearch.com/docs
+
+---
 
 ## License
 
