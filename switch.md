@@ -17,12 +17,13 @@ As a model switching expert, follow these steps exactly:
 
 ### Execution Flow
 
-1. **Read credentials**: From `settings.json` read `env.ANTHROPIC_API_KEY`.
+1. **Read credentials**: From `~\.claude\cc-switch.env` load `ANTHROPIC_API_KEY` and `CPA_MODELS_URL`. If `.env` is not configured, fall back to `settings.json` → `env.ANTHROPIC_API_KEY`.
 
 2. **Call CPA endpoint**:
 ```bash
-curl -s "https://<YOUR_CPA_PROXY>/v1/models" \
-  -H "Authorization: Bearer <YOUR_API_KEY>" \
+# CPA_MODELS_URL from .env, defaults to ANTHROPIC_BASE_URL/v1/models
+curl -s "$CPA_MODELS_URL" \
+  -H "Authorization: Bearer *** \
   -H "Content-Type: application/json"
 ```
 

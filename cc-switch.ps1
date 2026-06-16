@@ -5,10 +5,28 @@
 
 $script:CC_SETTINGS_PATH = "$env:USERPROFILE\.claude\settings.json"
 $script:CC_EXE_PATH = "$env:USERPROFILE\.local\bin\claude.exe"
+$script:CC_ENV_PATH = "$env:USERPROFILE\.claude\cc-switch.env"
 $script:CC_FALLBACK_EXES = @(
     "$env:LOCALAPPDATA\Programs\claude\claude.exe",
     "$env:APPDATA\npm\claude.cmd"
 )
+
+function Load-CCEnv {
+    # Load secrets from cc-switch.env (not committed to git)
+    if (Test-Path $script:CC_ENV_PATH) {
+        Get-Content $script:CC_ENV_PATH | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -match '^\s*([^#][^=]+)=(.*)$') {
+                $key = $Matches[1].Trim()
+                $val = $Matches[2].Trim()
+                [Environment]::SetEnvironmentVariable($key, $val, "Process")
+            }
+        }
+    }
+}
+
+# Load env at script import time
+Load-CCEnv
 
 function Find-ClaudeExe {
     if (Test-Path $script:CC_EXE_PATH) { return $script:CC_EXE_PATH }
@@ -80,15 +98,22 @@ function global:cc {
     Write-Host "  New: $Model" -ForegroundColor Green
     Write-Host ""
 
-    # Launch Claude Code with API key auth (no OAuth)
+    # Launch Claude Code with API key from .env or settings.json
     $claudeExe = Find-ClaudeExe
     if (-not $claudeExe) { return }
+
+    # .env values already loaded by Load-CCEnv at script import.
+    # If not set, fall back to settings.json values.
+    if (-not $env:ANTHROPIC_API_KEY) {
+        $env:ANTHROPIC_API_KEY = $json.env.ANTHROPIC_API_KEY
+    }
+    if (-not $env:ANTHROPIC_BASE_URL) {
+        $env:ANTHROPIC_BASE_URL = $json.env.ANTHROPIC_BASE_URL
+    }
 
     Write-Host "Launching Claude Code (API key auth, --bare)..." -ForegroundColor Cyan
     Write-Host ""
 
-    $env:ANTHROPIC_API_KEY = $json.env.ANTHROPIC_API_KEY
-    $env:ANTHROPIC_BASE_URL = $json.env.ANTHROPIC_BASE_URL
     & $claudeExe --bare
 }
 
@@ -112,13 +137,14 @@ function global:cc-status {
     if (-not $json) { return }
 
     $current = $json.env.ANTHROPIC_MODEL
+    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else { $json.env.ANTHROPIC_BASE_URL }
 
     Write-Host ""
     Write-Host "=== Claude Code Model Status ===" -ForegroundColor Cyan
     Write-Host "  Current : $current" -ForegroundColor Green
     Write-Host "  Model   : $($json.model)" -ForegroundColor White
     Write-Host "  Fallback: $($json.fallbackModel -join ', ')" -ForegroundColor Gray
-    Write-Host "  Base URL: $($json.env.ANTHROPIC_BASE_URL)" -ForegroundColor Gray
+    Write-Host "  Base URL: $baseUrl" -ForegroundColor Gray
     Write-Host "  Available: $($json.availableModels.Count) models" -ForegroundColor Gray
     Write-Host ""
 
@@ -143,7 +169,6 @@ function global:cc-status {
         }
     }
 
-    # Show others (ungrouped)
     $grouped = $groups.Values | ForEach-Object { $_ } | Select-Object -Unique
     $others = @($json.availableModels | Where-Object { $_ -notin $grouped })
     if ($others.Count -gt 0) {
