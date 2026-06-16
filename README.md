@@ -58,7 +58,9 @@ cc-default     # gpt-5.5
 
 # Sync models from CPA
 cc-sync        # fetch and diff
+cc-sync -List  # show full CPA model list
 cc-sync -Force # auto-add new models
+cc-sync -Remove# remove obsolete models
 
 # Skill menu management
 cc-audit           # audit visibility
@@ -67,6 +69,10 @@ cc-hide document-skills:*  # hide entire plugin
 cc-show docx       # restore
 cc-profile minimal # switch to minimal preset
 cc-commands        # list custom commands
+
+# Theme switching (Oh My Posh)
+cc-theme           # list themes
+cc-theme catppuccin# switch theme (live)
 ```
 
 ---

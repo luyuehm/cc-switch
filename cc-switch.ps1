@@ -586,6 +586,67 @@ function global:cc-commands {
     }
 }
 
+function global:cc-theme {
+    [CmdletBinding(DefaultParameterSetName='list')]
+    param(
+        [Parameter(Position=0, ParameterSetName='set')]
+        [string]$Name,
+
+        [Parameter(ParameterSetName='list')]
+        [switch]$List
+    )
+
+    $themeDir = "C:\tools\oh-my-posh\themes"
+    $ohMyPoshExe = "C:\tools\oh-my-posh.exe"
+
+    if (-not (Test-Path $themeDir)) {
+        Write-Host "[!]   Oh My Posh not installed." -ForegroundColor Yellow
+        Write-Host "  Install: irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex" -ForegroundColor Gray
+        Write-Host "  Say Y when asked about pwsh enhancements." -ForegroundColor Gray
+        return
+    }
+
+    $themes = Get-ChildItem "$themeDir\*.omp.json" | Sort-Object Name
+
+    if ($Name) {
+        $themeFile = Join-Path $themeDir "$Name.json"
+        if (-not (Test-Path $themeFile)) {
+            $themeFile = Join-Path $themeDir "$Name.omp.json"
+        }
+        if (-not (Test-Path $themeFile)) {
+            Write-Host "[!]   Theme '$Name' not found." -ForegroundColor Yellow
+            Write-Host "  Themes available:" -ForegroundColor Gray
+            $themes | ForEach-Object { Write-Host "    $($_.BaseName)" -ForegroundColor Gray }
+            return
+        }
+        & $ohMyPoshExe init pwsh --config $themeFile.FullName | Invoke-Expression
+        Write-Host "[OK]  Switched to theme: $($themeFile.BaseName)" -ForegroundColor Green
+        Write-Host "  To make permanent, edit `$PROFILE and change the theme path." -ForegroundColor Gray
+        return
+    }
+
+    # List themes with popular markers
+    Write-Host ""
+    Write-Host "=== Oh My Posh Themes ($($themes.Count)) ===" -ForegroundColor Cyan
+    Write-Host ""
+
+    $popular = @("powerlevel10k_rainbow", "powerlevel10k_classic", "montys", "catppuccin", "star", "tokyonight_storm", "gruvbox", "dracula")
+
+    $themes | ForEach-Object {
+        $marker = if ($_.BaseName -in $popular) { " =>" } else { "   " }
+        Write-Host "  $marker $($_.BaseName)" -ForegroundColor White
+    }
+
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor Yellow
+    Write-Host "  cc-theme <name>    Switch to theme (live preview)" -ForegroundColor White
+    Write-Host "  cc-theme           Show this list" -ForegroundColor White
+    Write-Host "  cc-theme montys    Example: switch to montys" -ForegroundColor White
+    Write-Host ""
+    Write-Host "To make permanent, edit `$PROFILE and update `$poshTheme path." -ForegroundColor Gray
+    Write-Host "Popular themes marked with =>" -ForegroundColor Gray
+}
+
 function global:cc-status {
     $json = Get-CCSettings
     if (-not $json) { return }
@@ -658,6 +719,7 @@ function Show-CCMenu {
     Write-Host "  cc-show <skill>    Restore hidden skill" -ForegroundColor White
     Write-Host "  cc-profile <name>  Switch preset (default|minimal|dev)" -ForegroundColor White
     Write-Host "  cc-commands        List/manage custom commands" -ForegroundColor White
+    Write-Host "  cc-theme           List/switch Oh My Posh theme" -ForegroundColor White
     Write-Host ""
     Write-Host "  cc-pro             claude-opus-4-7" -ForegroundColor White
     Write-Host "  cc-fast            deepseek-v4-flash" -ForegroundColor White

@@ -143,15 +143,7 @@ if ($installTools -eq "y" -or $installTools -eq "Y") {
     Write-Host "  Install later: cc-install-tools" -ForegroundColor Gray
 }
 
-# [6/5] Development link
 Write-Host ""
-Write-Host "[6/5] Development setup..." -ForegroundColor Yellow
-if (Test-Path "$scriptDir\cc-switch.ps1") {
-    # Already in the project, just confirm
-    Write-Host "  [INFO]   Script location: $scriptDir" -ForegroundColor Gray
-} else {
-    Write-Host "  [INFO]   Running from: $scriptDir" -ForegroundColor Gray
-}
 
 Write-Host ""
 Write-Host " ===============================================" -ForegroundColor Green
