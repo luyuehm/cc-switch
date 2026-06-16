@@ -344,7 +344,7 @@ function global:cc-hide {
         $json.skillOverrides = [PSCustomObject]@{}
     }
 
-    if ($Name -like "*:*" -and $Name -endswith "*") {
+    if ($Name -like "*:*" -and $Name.EndsWith("*")) {
         $plugin = $Name.Split(":")[0]
         $json.skillOverrides | Add-Member -NotePropertyName "$plugin:*" -NotePropertyValue "off" -Force
         Write-Host "🔇 Hiding plugin: $plugin (all skills)" -ForegroundColor Yellow
@@ -376,7 +376,7 @@ function global:cc-show {
         return
     }
 
-    if ($Name -like "*:*" -and $Name -endswith "*") {
+    if ($Name -like "*:*" -and $Name.EndsWith("*")) {
         $plugin = $Name.Split(":")[0]
         $keys = $json.skillOverrides.PSObject.Properties.Name | Where-Object { $_ -like "$plugin:*" }
         $count = $keys.Count
