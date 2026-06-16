@@ -17,12 +17,12 @@ As a model switching expert, follow these steps exactly:
 
 ### Execution Flow
 
-1. **Read credentials**: From `C:\Users\admin\.claude\settings.json` read `env.ANTHROPIC_API_KEY` (current value `your-api-key-here`).
+1. **Read credentials**: From `settings.json` read `env.ANTHROPIC_API_KEY`.
 
 2. **Call CPA endpoint**:
 ```bash
-curl -s "https://your-cpa-proxy.example.com/v1/models" \
-  -H "Authorization: Bearer <ANTHROPIC_API_KEY>" \
+curl -s "https://<YOUR_CPA_PROXY>/v1/models" \
+  -H "Authorization: Bearer <YOUR_API_KEY>" \
   -H "Content-Type: application/json"
 ```
 
@@ -49,7 +49,7 @@ Show models in groups:
 
 === Available Models (73) ===
 Current: gpt-5.5
-Base URL: https://your-cpa-proxy.example.com/
+Base URL: https://<YOUR_CPA_PROXY>/
 
 [GPT] (7):
   gpt-5.5

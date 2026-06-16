@@ -69,6 +69,43 @@ Then inside Claude Code:
 - Claude Code CLI installed (any version)
 - API key configured in `~/.claude/settings.json`
 
+## Configuration
+
+cc-switch reads model list and credentials from your Claude Code `settings.json`. Two endpoints matter:
+
+### 1. Model API endpoint (`ANTHROPIC_BASE_URL`)
+
+Your Claude Code's `settings.json` must have:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_API_KEY": "your-api-key",
+    "ANTHROPIC_BASE_URL": "https://your-cpa-proxy.example.com"
+  }
+}
+```
+
+This is the endpoint Claude Code calls for inference. Point it to your CPA proxy or any OpenAI-compatible API.
+
+### 2. CPA model detection endpoint (`switch.md`)
+
+The `/switch` slash command optionally queries a CPA `/v1/models` endpoint to discover available models dynamically. Edit `switch.md` after install:
+
+```bash
+# In switch.md, Step 0, replace:
+curl -s "https://<YOUR_CPA_PROXY>/v1/models" \
+  -H "Authorization: Bearer <YOUR_API_KEY>"
+```
+
+Set `<YOUR_CPA_PROXY>` to your model gateway (e.g. `your-cpa-proxy.example.com`, `api.openai.com`, any litellm proxy).
+
+If you don't use CPA detection, just use `/switch --offline` — it works entirely from your local `availableModels` list.
+
+### Adding models to your local list
+
+Edit `~/.claude/settings.json` and add model names to the `availableModels` array. cc-switch validates model names against this list before switching.
+
 ## Files
 
 | File | Purpose |
