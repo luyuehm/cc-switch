@@ -727,11 +727,35 @@ function Show-CCMenu {
     Write-Host ""
     Write-Host "Current: $current" -ForegroundColor Green
     Write-Host ""
-    Write-Host "GPT:        gpt-5.5  gpt-5.4-mini  gpt-5.3-codex" -ForegroundColor Gray
-    Write-Host "Claude:     claude-sonnet-4.6  claude-opus-4-7" -ForegroundColor Gray
-    Write-Host "DeepSeek:   deepseek-v4-flash  deepseek-v4-flash-free" -ForegroundColor Gray
-    Write-Host "Qwen:       qwen3.6-35b-a3b-nvfp4  qwen3.6-plus-free" -ForegroundColor Gray
-    Write-Host "Grok:       grok-4.20-auto  grok-4.20-fast" -ForegroundColor Gray
-    Write-Host "Moonshot:   moonshotai/kimi-k2.6" -ForegroundColor Gray
-    Write-Host "AI/Other:   ai  ai-model  multi-model  fallback" -ForegroundColor Gray
+
+    # Dynamic model list from availableModels
+    $json = Get-CCSettings
+    if ($json -and $json.availableModels -and $json.availableModels.Count -gt 0) {
+        $cats = @{}
+        $json.availableModels | ForEach-Object {
+            $cat = if ($_ -imatch "^(gpt|o\d)") { "GPT" }
+            elseif ($_ -imatch "^claude|^sonnet|^haiku") { "Claude" }
+            elseif ($_ -imatch "^deepseek") { "DeepSeek" }
+            elseif ($_ -imatch "^qwen") { "Qwen" }
+            elseif ($_ -imatch "^grok") { "Grok" }
+            elseif ($_ -imatch "^kimi|^moonshot") { "Moonshot" }
+            elseif ($_ -imatch "^llama") { "Llama" }
+            elseif ($_ -imatch "^mistral|^mixtral") { "Mistral" }
+            elseif ($_ -imatch "^gemin") { "Gemini" }
+            elseif ($_ -imatch "step") { "Stepfun" }
+            else { "Other" }
+            if (-not $cats[$cat]) { $cats[$cat] = @() }
+            $cats[$cat] += $_
+        }
+        $cats.Keys | Sort-Object @{Expression={
+            switch ($_) {
+                "GPT" { 1 }; "Claude" { 2 }; "DeepSeek" { 3 }; "Grok" { 4 }
+                "Qwen" { 5 }; "Gemini" { 6 }; "Moonshot" { 7 }; "Llama" { 8 }
+                "Mistral" { 9 }; "Stepfun" { 10 }; default { 99 }
+            }
+        }} | ForEach-Object {
+            $models = $cats[$_] -join "  "
+            Write-Host "$($_):`t$models" -ForegroundColor Gray
+        }
+    }
 }
