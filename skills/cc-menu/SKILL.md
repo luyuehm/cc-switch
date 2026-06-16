@@ -12,7 +12,7 @@ effort: low
 管理 Claude Code 的 `/` 斜杠命令菜单：审计可见技能、隐藏/显示技能、管理自定义斜杠命令。
 
 **共享 CLI 脚本:** `~/.claude/skills/cc-menu/bin/cc-menu.sh`
-**GitHub:** https://github.com/luyuehm/cc-menu
+**GitHub:** github.com/luyuehm/cc-switch (cc-menu merged v2.0+)
 
 ## 快速使用
 

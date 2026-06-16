@@ -182,7 +182,6 @@ cc-switch/
 
 ## Related
 
-- **cc-menu original**: https://github.com/luyuehm/cc-menu (now integrated)
 - **Hermes Agent**: https://hermes-agent.nousresearch.com/docs
 
 ---
