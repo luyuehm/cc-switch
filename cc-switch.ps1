@@ -346,7 +346,8 @@ function global:cc-hide {
 
     if ($Name -like "*:*" -and $Name.EndsWith("*")) {
         $plugin = $Name.Split(":")[0]
-        $json.skillOverrides | Add-Member -NotePropertyName "$plugin:*" -NotePropertyValue "off" -Force
+        $propertyName = "$plugin:*"
+        $json.skillOverrides | Add-Member -NotePropertyName $propertyName -NotePropertyValue "off" -Force
         Write-Host "🔇 Hiding plugin: $plugin (all skills)" -ForegroundColor Yellow
     } else {
         $json.skillOverrides | Add-Member -NotePropertyName $Name -NotePropertyValue "off" -Force
