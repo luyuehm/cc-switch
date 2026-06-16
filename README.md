@@ -44,6 +44,10 @@ cc-status
 cc-pro         # claude-opus-4-7
 cc-fast        # deepseek-v4-flash
 cc-default     # gpt-5.5
+
+# Sync model list from CPA endpoint
+cc-sync        # fetch CPA models, show diff, add new ones
+cc-sync -Force # auto-add without confirmation
 ```
 
 ## Claude Code Slash Command

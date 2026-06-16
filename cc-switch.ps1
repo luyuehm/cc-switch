@@ -132,6 +132,118 @@ function global:cc-default {
     cc gpt-5.5
 }
 
+function global:cc-sync {
+    <#
+    .SYNOPSIS
+        Fetch available models from CPA endpoint and sync to local availableModels.
+    #>
+    param([switch]$Force)
+
+    # Determine CPA models URL
+    $cpaUrl = if ($env:CPA_MODELS_URL) {
+        $env:CPA_MODELS_URL
+    } else {
+        $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
+            $json = Get-CCSettings
+            if ($json) { $json.env.ANTHROPIC_BASE_URL } else { "" }
+        }
+        if ($baseUrl) { "$baseUrl/v1/models" } else { "" }
+    }
+
+    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
+        $json = Get-CCSettings
+        if ($json -and $json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else { "" }
+    }
+
+    if (-not $cpaUrl -or -not $apiKey) {
+        Write-Host "Error: CPA_MODELS_URL or API key not configured." -ForegroundColor Red
+        Write-Host "  Set CPA_MODELS_URL and ANTHROPIC_API_KEY in ~\.claude\cc-switch.env" -ForegroundColor Yellow
+        return
+    }
+
+    Write-Host "Fetching models from CPA..." -ForegroundColor Cyan
+    Write-Host "  $cpaUrl" -ForegroundColor Gray
+
+    try {
+        $response = Invoke-RestMethod -Uri $cpaUrl -Headers @{
+            "Authorization" = "Bearer $apiKey"
+            "Content-Type" = "application/json"
+        } -TimeoutSec 15 -ErrorAction Stop
+
+        $cpaModels = if ($response.data) {
+            $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
+        } elseif ($response -is [array]) {
+            $response | ForEach-Object { $_.id } | Where-Object { $_ }
+        } else {
+            Write-Host "Error: unexpected CPA response format." -ForegroundColor Red
+            return
+        }
+
+        if ($cpaModels.Count -eq 0) {
+            Write-Host "No models returned from CPA." -ForegroundColor Red
+            return
+        }
+
+        Write-Host "  Got $($cpaModels.Count) models from CPA" -ForegroundColor Green
+    } catch {
+        Write-Host "Error fetching CPA models: $_" -ForegroundColor Red
+        return
+    }
+
+    $json = Get-CCSettings
+    if (-not $json) { return }
+
+    $local = $json.availableModels
+    $newModels = @($cpaModels | Where-Object { $_ -notin $local })
+    $goneModels = @($local | Where-Object { $_ -notin $cpaModels })
+
+    Write-Host ""
+    Write-Host "=== CPA Sync Report ===" -ForegroundColor Cyan
+    Write-Host "  CPA total : $($cpaModels.Count)" -ForegroundColor White
+    Write-Host "  Local     : $($local.Count)" -ForegroundColor White
+    if ($newModels.Count -gt 0) {
+        Write-Host "  New       : +$($newModels.Count) (not yet in local)" -ForegroundColor Green
+    }
+    if ($goneModels.Count -gt 0) {
+        Write-Host "  Gone      : -$($goneModels.Count) (removed from CPA)" -ForegroundColor Yellow
+    }
+
+    if ($newModels.Count -gt 0) {
+        Write-Host ""
+        Write-Host "New models available:" -ForegroundColor Green
+        $newModels | Sort-Object | ForEach-Object { Write-Host "  + $_" -ForegroundColor Green }
+
+        if ($Force) {
+            $add = $true
+        } else {
+            Write-Host ""
+            Write-Host "Add these to local list? [Y/n] " -ForegroundColor Yellow -NoNewline
+            $choice = Read-Host
+            $add = ($choice -eq "" -or $choice -eq "y" -or $choice -eq "Y")
+        }
+
+        if ($add) {
+            $merged = @($local) + @($newModels) | Sort-Object -Unique
+            $json.availableModels = $merged
+            Save-CCSettings $json
+            Write-Host "Updated: $($local.Count) -> $($merged.Count) models" -ForegroundColor Green
+        } else {
+            Write-Host "Skipped. Use 'cc-sync -Force' to auto-add." -ForegroundColor Gray
+        }
+    }
+
+    if ($goneModels.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Models removed from CPA (still in local):" -ForegroundColor Yellow
+        $goneModels | Sort-Object | ForEach-Object { Write-Host "  - $_" -ForegroundColor Yellow }
+        Write-Host "Use '/switch --remove <name>' to clean up." -ForegroundColor Gray
+    }
+
+    if ($newModels.Count -eq 0 -and $goneModels.Count -eq 0) {
+        Write-Host "  Status: fully in sync" -ForegroundColor Green
+    }
+}
+
 function global:cc-status {
     $json = Get-CCSettings
     if (-not $json) { return }
@@ -194,6 +306,7 @@ function Show-CCMenu {
     Write-Host "  cc <model>         Switch and launch" -ForegroundColor White
     Write-Host "  cc                 This menu" -ForegroundColor White
     Write-Host "  cc-status          Full model inventory" -ForegroundColor White
+    Write-Host "  cc-sync            Sync models from CPA endpoint" -ForegroundColor White
     Write-Host ""
     Write-Host "  cc-pro             claude-opus-4-7" -ForegroundColor White
     Write-Host "  cc-fast            deepseek-v4-flash" -ForegroundColor White
