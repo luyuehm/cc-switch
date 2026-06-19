@@ -51,7 +51,7 @@ cc-commands remove  # Remove a slash command
 cc-theme            # List Oh My Posh themes
 cc-theme <name>     # Switch theme (live preview)
 ```
-=======
+
 - **Terminal Enhancements**: Optional Oh My Posh, file icons, smart cd
 
 *100% PowerShell — works on Windows (pwsh)*
@@ -76,7 +76,6 @@ The installer will:
 ```
 
 Say **Y** at step [5/5] for a full oh-my-zsh-like experience. Say N for minimal install.
->>>>>>> c80e70d2c16f224be45c5f98c5ef402cfe960246
 
 ### Configure Secrets
 
@@ -193,7 +192,7 @@ The `/switch` slash command works inside Claude Code on both macOS and Windows. 
 | Shell startup | None (guard active) | No conflict |
 | `cc <model>` | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` | No warning |
 | `claude` directly | claude.ai OAuth only | Normal behavior |
-=======
+
 ```bash
 ANTHROPIC_API_KEY=your-api-key-here
 ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
@@ -419,7 +418,6 @@ cc-menu cleaner test
 See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
 
 ---
->>>>>>> c80e70d2c16f224be45c5f98c5ef402cfe960246
 
 ## Project Structure
 
