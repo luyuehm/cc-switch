@@ -7,6 +7,9 @@ CC_ENV_PATH="$HOME/.claude/cc-switch.env"
 
 __cc_load_env() {
   [[ -f "$CC_ENV_PATH" ]] || return
+  # Skip auto-export if CC_SWITCH_SKIP_ENV is set (prevents "Both claude.ai and API_KEY" conflict)
+  # See README.md#claudeai-conflict for details.
+  [[ "${CC_SWITCH_SKIP_ENV:-0}" == "1" ]] && return
   while IFS='=' read -r key val; do
     key="${key#"${key%%[![:space:]]*}"}"
     [[ -z "$key" || "$key" =~ ^# ]] && continue
@@ -35,31 +38,33 @@ json.dump(d, sys.stdout, indent=2, ensure_ascii=False)
 }
 
 __cc_find_claude() {
+  local cb
+  for cb in "$HOME/.local/bin/claude" "/opt/homebrew/bin/claude" "/usr/local/bin/claude"; do
+    if [[ -x "$cb" ]] && "$cb" --version 2>&1 | grep -q "Claude Code"; then
+      echo "$cb"
+      return
+    fi
+  done
   if command -v claude &>/dev/null; then
-    echo "claude"
+    cb="$(command -v claude)"
+    if "$cb" --version 2>&1 | grep -q "Claude Code"; then
+      echo "claude"
+      return
+    fi
+  fi
+  if npx -y @anthropic-ai/claude-code --version &>/dev/null; then
+    echo "npx -y @anthropic-ai/claude-code"
     return
   fi
-  if [[ -x "$HOME/.local/bin/claude" ]]; then
-    echo "$HOME/.local/bin/claude"
-    return
-  fi
-  if [[ -x "/usr/local/bin/claude" ]]; then
-    echo "/usr/local/bin/claude"
-    return
-  fi
-  if [[ -x "/opt/homebrew/bin/claude" ]]; then
-    echo "/opt/homebrew/bin/claude"
-    return
-  fi
-  local npx_claude
-  npx_claude="$(npx -y @anthropic-ai/claude-code --version 2>/dev/null)" && echo "npx -y @anthropic-ai/claude-code" && return
   echo ""
 }
 
 __cc_read_settings() {
   if [[ ! -f "$CC_SETTINGS_PATH" ]]; then
-    echo "Error: settings.json not found at $CC_SETTINGS_PATH" >&2
-    return 1
+    mkdir -p "$(dirname "$CC_SETTINGS_PATH")"
+    echo '{"availableModels":[],"env":{}}' > "$CC_SETTINGS_PATH"
+  elif ! python3 -c "import json; json.load(open('$CC_SETTINGS_PATH'))" 2>/dev/null; then
+    echo '{"availableModels":[],"env":{}}' > "$CC_SETTINGS_PATH"
   fi
   cat "$CC_SETTINGS_PATH"
 }
@@ -91,7 +96,7 @@ cc() {
 import json,sys
 d=json.load(sys.stdin)
 models=d.get('availableModels',[])
-if '$model' in models:
+if not models or '$model' in models:
     print('yes')
 else:
     print('no')
@@ -118,6 +123,9 @@ for k in ['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_H
     d['env'][k]=model
 d['fallbackModel']=[model]
 d['model']=model
+existing=set(d.get('availableModels',[]))
+existing.add(model)
+d['availableModels']=sorted(existing)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
 
@@ -135,7 +143,7 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
     return 1
   fi
 
-  echo "Launching Claude Code (API key auth, --bare)..."
+  echo "Launching Claude Code (API key auth)..."
   echo ""
 
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
@@ -154,7 +162,7 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
     [[ -n "$fallback_url" ]] && export ANTHROPIC_BASE_URL="$fallback_url"
   fi
 
-  eval "$claude_bin --bare"
+  eval "$claude_bin"
 }
 
 # === SHORTCUTS ===

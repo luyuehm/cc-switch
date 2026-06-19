@@ -71,6 +71,35 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 ```
 
+## ⚠ claude.ai Login Conflict Fix
+
+**Problem**: When both Claude Code CLI is signed in via `claude.ai` (OAuth) and `ANTHROPIC_API_KEY` is set in the environment, Claude Code shows a conflict warning:
+
+> ⚠ Both claude.ai and ANTHROPIC_API_KEY set · auth may not work as expected
+
+**Solution**: Install with the guard enabled. After running `install.sh`, the `~/.zshrc` (or `~/.bash_profile`) will have:
+
+```bash
+# Guard: prevent cc-switch.sh from auto-exporting API keys at shell startup
+export CC_SWITCH_SKIP_ENV=1
+
+if [[ -f "$HOME/.claude/cc-switch.sh" ]]; then
+  . "$HOME/.claude/cc-switch.sh"
+fi
+```
+
+The `CC_SWITCH_SKIP_ENV=1` guard is checked in `__cc_load_env()` — it skips auto-exporting `ANTHROPIC_API_KEY` at shell startup, but the `cc` function still works correctly and loads env vars when launching Claude Code.
+
+**How it works**:
+
+| Scenario | API Key exported? | Result |
+|----------|-------------------|--------|
+| Shell startup (guard enabled) | ❌ No | No conflict warning |
+| Run `cc <model>` | ✅ Yes (by `cc` function) | Claude Code launches normally |
+| Run `claude` directly | ❌ No | Uses claude.ai auth only |
+
+**Revert**: If you want the old behavior (API key always exported), remove `export CC_SWITCH_SKIP_ENV=1` from your shell config.
+
 ## Project Structure
 
 ```
