@@ -103,10 +103,7 @@ else:
 ")"
 
   if [[ "$found" != "yes" ]]; then
-    local total
-    total="$(echo "$json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('availableModels',[])))")"
-    echo "Error: '$model' not in availableModels ($total total)" >&2
-    return 1
+    echo "Adding '$model' to availableModels..."
   fi
 
   local old_model
@@ -146,12 +143,13 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
   echo "Launching Claude Code (API key auth)..."
   echo ""
 
+  CC_SWITCH_SKIP_ENV=0 __cc_load_env
+
+  local auth_key=""
   if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    export ANTHROPIC_API_KEY
+    auth_key="$ANTHROPIC_API_KEY"
   else
-    local fallback_key
-    fallback_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
-    [[ -n "$fallback_key" ]] && export ANTHROPIC_API_KEY="$fallback_key"
+    auth_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
   fi
 
   if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
@@ -160,6 +158,11 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
     local fallback_url
     fallback_url="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_BASE_URL','')")"
     [[ -n "$fallback_url" ]] && export ANTHROPIC_BASE_URL="$fallback_url"
+  fi
+
+  if [[ -n "$auth_key" ]]; then
+    unset ANTHROPIC_API_KEY
+    export ANTHROPIC_AUTH_TOKEN="$auth_key"
   fi
 
   eval "$claude_bin"
@@ -193,6 +196,7 @@ cc-sync() {
     esac
   done
 
+  CC_SWITCH_SKIP_ENV=0 __cc_load_env
   local cpa_url="${CPA_MODELS_URL:-}"
   local api_key="${ANTHROPIC_API_KEY:-}"
 
