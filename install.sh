@@ -35,7 +35,8 @@ if [[ -d "$SKILLS_DIR" ]]; then
   echo "  [INFO]   cc-menu skills already exist, skipping..."
 else
   if [[ -d "$SCRIPT_DIR/skills/cc-menu" ]]; then
-    cp -R "$SCRIPT_DIR/skills/cc-menu" "$SKILLS_DIR"
+    mkdir -p "$SKILLS_DIR"
+    cp -R "$SCRIPT_DIR/skills/cc-menu/." "$SKILLS_DIR"
     echo "  [OK]  cc-menu skills installed to $SKILLS_DIR"
   else
     echo "  (!)   cc-menu skills not found (optional, skipped)"
