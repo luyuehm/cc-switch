@@ -71,26 +71,10 @@ fi
 echo ""
 echo "[4/5] Configuring shell profile..."
 ZSHRC="$HOME/.zshrc"
-CC_BLOCK='# === cc-switch — Claude Code Model + Menu Manager ===
-# https://github.com/luyuehm/cc-switch
-
-# Oh My Posh (prompt theme) — macOS
-if command -v oh-my-posh &>/dev/null; then
-  eval "$(oh-my-posh init zsh --config "$(oh-my-posh cache path 2>/dev/null)/themes/powerlevel10k_rainbow.omp.json" 2>/dev/null || oh-my-posh init zsh)"
-fi
-
-# zoxide (smart cd) — macOS
-if command -v zoxide &>/dev/null; then
-  eval "$(zoxide init zsh)"
-fi
-
-# cc-switch core
+CC_BLOCK='# cc-switch core
 if [[ -f "$HOME/.claude/cc-switch.sh" ]]; then
   . "$HOME/.claude/cc-switch.sh"
-else
-  echo "[cc-switch] Not installed. Run: curl -fsSL https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.sh | bash"
-fi
-# <<< cc-switch'
+fi'
 
 if [[ -f "$ZSHRC" ]]; then
   if grep -q "cc-switch" "$ZSHRC"; then
