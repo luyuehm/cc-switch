@@ -146,7 +146,9 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
   CC_SWITCH_SKIP_ENV=0 __cc_load_env
 
   local auth_key=""
-  if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    auth_key="$ANTHROPIC_AUTH_TOKEN"
+  elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     auth_key="$ANTHROPIC_API_KEY"
   else
     auth_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
