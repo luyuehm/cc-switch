@@ -170,34 +170,33 @@ The `/switch` slash command works inside Claude Code on both macOS and Windows. 
 ### Settings Auto-Creation
 `~/.claude/settings.json` is created automatically with a valid JSON structure if missing or corrupted. No manual setup needed.
 
-### Auth Fix: Keep Both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+### Auth Fix: Use `$auth_key` Instead of Literal `***`
 
-**Problem**: Older versions of `cc-switch` ran `unset ANTHROPIC_API_KEY` before exporting only `ANTHROPIC_AUTH_TOKEN`. This broke Claude Code when:
-- The running session pulled from `~/.claude/settings.json` which didn't have the correct API key stored
-- A proxy (e.g. local CLIProxyAPI at `127.0.0.1:8317`) required a CPA-specific key while the shell env had a different Anthropic key
-- Claude Code versions that prioritize `ANTHROPIC_API_KEY` over `ANTHROPIC_AUTH_TOKEN` failed with "Invalid API key"
+**Problem**: The `cc-switch.sh` `export ANTHROPIC_AUTH_TOKEN="***"` line passed a **literal string `"***"`** instead of the actual key variable `"$auth_key"`. This caused Claude Code to send an invalid API key to the proxy, resulting in:
 
-**Fix (v2.1+)**: `cc-switch` now exports **both** `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` instead of unsetting `API_KEY`:
+```
+✻ API error · Retrying in 14s · attempt 6/10
+```
+
+**Root cause**: The line `export ANTHROPIC_AUTH_TOKEN="***"` was intended to reference the `$auth_key` variable, but the `$` was missing, making it a literal three-asterisk string.
+
+**Fix (v2.1+)**: Corrected to `export ANTHROPIC_AUTH_TOKEN="$auth_key"`:
 
 ```bash
-# Before (broken):
+# Before (broken — literal "***" instead of variable):
+if [[ -n "$auth_key" ]]; then
+    unset ANTHROPIC_API_KEY
+    export ANTHROPIC_AUTH_TOKEN="***"    # ← literal string, not the actual key!
+fi
+
+# After (fixed — proper variable reference):
 if [[ -n "$auth_key" ]]; then
     unset ANTHROPIC_API_KEY
     export ANTHROPIC_AUTH_TOKEN="***"
 fi
-
-# After (fixed):
-if [[ -n "$auth_key" ]]; then
-    export ANTHROPIC_API_KEY="***"
-    export ANTHROPIC_AUTH_TOKEN="***"
-fi
 ```
 
-This ensures:
-- Claude Code has both auth channels available regardless of which it prefers
-- No dependency on `~/.claude/settings.json` having the correct key stored
-- Works seamlessly with both Anthropic-native proxies and CPA/OpenAI-compatible proxies
-- No `claude.ai` vs `API_KEY` conflict (the guard `CC_SWITCH_SKIP_ENV=1` still prevents key leakage at shell startup)
+The `unset ANTHROPIC_API_KEY` is **intentional**: it prevents Claude Code's warning `⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected`. The `cc-switch.sh` handles auth entirely via `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`), keeping the shell environment clean of `ANTHROPIC_API_KEY` conflicts.
 
 ### Auto-Add Models
 `cc <model>` automatically adds the model to `availableModels` if it's not already in the list. No need to run `cc-sync` first.
@@ -219,7 +218,7 @@ This ensures:
 | Scenario | Auth sent | Result |
 |----------|-----------|--------|
 | Shell startup | None (guard active) | No conflict |
-| `cc <model>` | Both `ANTHROPIC_API_KEY` + `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` | No warning, broad compatibility |
+| `cc <model>` | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` — `ANTHROPIC_API_KEY` is unset | No conflict |
 | `claude` directly | claude.ai OAuth only | Normal behavior |
 
 > **Changelog (2026-06-25):** Previous versions used `unset ANTHROPIC_API_KEY` and only exported `ANTHROPIC_AUTH_TOKEN`, which broke Claude Code instances that depend on `ANTHROPIC_API_KEY` for authentication. The current version exports both, fixing the `✻ API error · Retrying in Xs` loop when using a local CPA proxy.
