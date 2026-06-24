@@ -161,7 +161,8 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
   fi
 
   if [[ -n "$auth_key" ]]; then
-    unset ANTHROPIC_API_KEY
+    # Keep both for broad Claude Code compatibility
+    export ANTHROPIC_API_KEY="$auth_key"
     export ANTHROPIC_AUTH_TOKEN="$auth_key"
   fi
 

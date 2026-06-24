@@ -170,6 +170,35 @@ The `/switch` slash command works inside Claude Code on both macOS and Windows. 
 ### Settings Auto-Creation
 `~/.claude/settings.json` is created automatically with a valid JSON structure if missing or corrupted. No manual setup needed.
 
+### Auth Fix: Keep Both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN`
+
+**Problem**: Older versions of `cc-switch` ran `unset ANTHROPIC_API_KEY` before exporting only `ANTHROPIC_AUTH_TOKEN`. This broke Claude Code when:
+- The running session pulled from `~/.claude/settings.json` which didn't have the correct API key stored
+- A proxy (e.g. local CLIProxyAPI at `127.0.0.1:8317`) required a CPA-specific key while the shell env had a different Anthropic key
+- Claude Code versions that prioritize `ANTHROPIC_API_KEY` over `ANTHROPIC_AUTH_TOKEN` failed with "Invalid API key"
+
+**Fix (v2.1+)**: `cc-switch` now exports **both** `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` instead of unsetting `API_KEY`:
+
+```bash
+# Before (broken):
+if [[ -n "$auth_key" ]]; then
+    unset ANTHROPIC_API_KEY
+    export ANTHROPIC_AUTH_TOKEN="***"
+fi
+
+# After (fixed):
+if [[ -n "$auth_key" ]]; then
+    export ANTHROPIC_API_KEY="***"
+    export ANTHROPIC_AUTH_TOKEN="***"
+fi
+```
+
+This ensures:
+- Claude Code has both auth channels available regardless of which it prefers
+- No dependency on `~/.claude/settings.json` having the correct key stored
+- Works seamlessly with both Anthropic-native proxies and CPA/OpenAI-compatible proxies
+- No `claude.ai` vs `API_KEY` conflict (the guard `CC_SWITCH_SKIP_ENV=1` still prevents key leakage at shell startup)
+
 ### Auto-Add Models
 `cc <model>` automatically adds the model to `availableModels` if it's not already in the list. No need to run `cc-sync` first.
 
@@ -185,13 +214,15 @@ The `/switch` slash command works inside Claude Code on both macOS and Windows. 
 **Solution**: `cc-switch` handles this automatically:
 
 - At shell startup, `CC_SWITCH_SKIP_ENV=1` (set in `.zshrc`) prevents auto-loading the API key — `claude` run directly uses claude.ai auth.
-- When `cc <model>` runs, it force-loads the env file and exports the key as `ANTHROPIC_AUTH_TOKEN` instead of `ANTHROPIC_API_KEY`, sending `Authorization: Bearer` to your proxy, with no conflict warning.
+- When `cc <model>` runs, it force-loads the env file and exports both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` with the same key value. This ensures broad compatibility — some Claude Code versions prefer `API_KEY` over `AUTH_TOKEN`, and different build variants (e.g. Codex, CPA) may check one or the other.
 
 | Scenario | Auth sent | Result |
 |----------|-----------|--------|
 | Shell startup | None (guard active) | No conflict |
-| `cc <model>` | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` | No warning |
+| `cc <model>` | Both `ANTHROPIC_API_KEY` + `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` | No warning, broad compatibility |
 | `claude` directly | claude.ai OAuth only | Normal behavior |
+
+> **Changelog (2026-06-25):** Previous versions used `unset ANTHROPIC_API_KEY` and only exported `ANTHROPIC_AUTH_TOKEN`, which broke Claude Code instances that depend on `ANTHROPIC_API_KEY` for authentication. The current version exports both, fixing the `✻ API error · Retrying in Xs` loop when using a local CPA proxy.
 
 ```bash
 ANTHROPIC_API_KEY=your-api-key-here
