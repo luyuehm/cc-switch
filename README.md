@@ -518,6 +518,58 @@ Without the shim, `claude` pointed directly at port 8317 works for
 Anthropic models (sonnet, opus) but may fail on Qwen / DeepSeek / GLM
 models with `400` errors.
 
+### Env Cleanup: Avoiding the "Both set" Warning
+
+When Claude Code is launched with a proxy that exposes an OpenAI-compatible
+endpoint, it reads credentials from two sources:
+
+1. **settings overlay** (via `--settings`) — typically sets `ANTHROPIC_AUTH_TOKEN`
+2. **Shell environment** — may have `ANTHROPIC_API_KEY` from automation tools
+
+If both are present, Claude Code warns:
+
+```
+⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected
+```
+
+**Root cause:** The `set_api_key` parameter in the backend configuration controls
+whether the overlay includes `ANTHROPIC_API_KEY`:
+
+```python
+BACKENDS = {
+    "cpa": {
+        "set_api_key": False,   # only AUTH_TOKEN in overlay → API_KEY leaks from env
+    },
+    "kiro": {
+        "set_api_key": True,    # both in overlay → no leak
+    },
+}
+```
+
+When `set_api_key: False`, the overlay only provides `ANTHROPIC_AUTH_TOKEN`.
+The shell env's `ANTHROPIC_API_KEY` (managed by automation) passes through
+uncovered, and Claude Code sees two keys.
+
+**Solution:** `cc-switch.sh` handles this automatically — it reads
+`ANTHROPIC_AUTH_TOKEN` first (v2.1+), then **unsets** `ANTHROPIC_API_KEY`
+from the shell environment before launching Claude Code:
+
+```bash
+# cc-switch.sh v2.1+ pseudocode:
+# 1. Read key (AUTH_TOKEN first)
+auth_key="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
+# 2. Unset the conflicting env var
+unset ANTHROPIC_API_KEY
+# 3. Export only AUTH_TOKEN
+export ANTHROPIC_AUTH_TOKEN="$auth_key"
+# 4. Launch Claude Code
+eval "$claude_bin"
+```
+
+If you use a different launcher (ccx, custom script), apply the same
+pattern: read the key first, then strip `ANTHROPIC_API_KEY` from the
+environment before `exec`/`execvp`.
+
 See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
 
 ---
