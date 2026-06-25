@@ -198,10 +198,22 @@ cc-sync() {
     esac
   done
 
-  CC_SWITCH_SKIP_ENV=0 __cc_load_env
-  local cpa_url="${CPA_MODELS_URL:-}"
-  local api_key="${ANTHROPIC_API_KEY:-}"
+  # Priority: current shell ANTHROPIC_BASE_URL > cc-switch.env > settings.json
+  local shell_url="${ANTHROPIC_BASE_URL:-}"
+  local shell_key="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
 
+  # Load cc-switch.env as fallback (AFTER saving shell values)
+  CC_SWITCH_SKIP_ENV=0 __cc_load_env
+
+  # Priority: shell ANTHROPIC_BASE_URL > file CPA_MODELS_URL > settings.json
+  local cpa_url="${shell_url:+${shell_url%/}/v1/models}"
+  cpa_url="${cpa_url:-${CPA_MODELS_URL:-}}"
+  local api_key="${shell_key:-}"
+  api_key="${api_key:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}}"
+
+  if [[ -z "$cpa_url" ]]; then
+    cpa_url="${ANTHROPIC_BASE_URL:+${ANTHROPIC_BASE_URL%/}/v1/models}"
+  fi
   if [[ -z "$cpa_url" ]]; then
     local json
     json="$(__cc_read_settings 2>/dev/null)" || true
@@ -222,7 +234,11 @@ cc-sync() {
 
   if [[ -z "$cpa_url" || -z "$api_key" ]]; then
     echo "Error: CPA_MODELS_URL or API key not configured." >&2
-    echo "  Set CPA_MODELS_URL and ANTHROPIC_API_KEY in ~/.claude/cc-switch.env" >&2
+    echo "  Set in ~/.openclaw/.env (recommended):" >&2
+    echo "    CLAUDE_CODE_BASE_URL=http://127.0.0.1:8317" >&2
+    echo "    CPA_API_KEY=<your-cpa-key>" >&2
+    echo "  Or set in ~/.claude/cc-switch.env:" >&2
+    echo "    CPA_MODELS_URL and ANTHROPIC_API_KEY" >&2
     return 1
   fi
 
