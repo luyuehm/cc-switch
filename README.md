@@ -170,33 +170,35 @@ The `/switch` slash command works inside Claude Code on both macOS and Windows. 
 ### Settings Auto-Creation
 `~/.claude/settings.json` is created automatically with a valid JSON structure if missing or corrupted. No manual setup needed.
 
-### Auth Fix: Use `$auth_key` Instead of Literal `***`
+### Auth Priority: Prefer `ANTHROPIC_AUTH_TOKEN` Over `ANTHROPIC_API_KEY`
 
-**Problem**: The `cc-switch.sh` `export ANTHROPIC_AUTH_TOKEN="***"` line passed a **literal string `"***"`** instead of the actual key variable `"$auth_key"`. This caused Claude Code to send an invalid API key to the proxy, resulting in:
-
-```
-✻ API error · Retrying in 14s · attempt 6/10
-```
-
-**Root cause**: The line `export ANTHROPIC_AUTH_TOKEN="***"` was intended to reference the `$auth_key` variable, but the `$` was missing, making it a literal three-asterisk string.
-
-**Fix (v2.1+)**: Corrected to `export ANTHROPIC_AUTH_TOKEN="$auth_key"`:
+When both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are set in the environment
+(common in managed setups where automation tools manage `API_KEY`
+while a separate CPA proxy key is provided as `AUTH_TOKEN`), cc-switch now
+reads `AUTH_TOKEN` first before falling back to `API_KEY`:
 
 ```bash
-# Before (broken — literal "***" instead of variable):
-if [[ -n "$auth_key" ]]; then
-    unset ANTHROPIC_API_KEY
-    export ANTHROPIC_AUTH_TOKEN="***"    # ← literal string, not the actual key!
-fi
-
-# After (fixed — proper variable reference):
-if [[ -n "$auth_key" ]]; then
-    unset ANTHROPIC_API_KEY
-    export ANTHROPIC_AUTH_TOKEN="***"
+# Current priority (v2.1+):
+if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    auth_key="***"        # 1st choice: Bearer token
+elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    auth_key="***"           # 2nd choice: API key
+else
+    auth_key="$(settings.json ...)"         # 3rd choice: stored config
 fi
 ```
 
-The `unset ANTHROPIC_API_KEY` is **intentional**: it prevents Claude Code's warning `⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected`. The `cc-switch.sh` handles auth entirely via `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`), keeping the shell environment clean of `ANTHROPIC_API_KEY` conflicts.
+This prevents sending wrong credentials when multiple keys coexist in
+the shell environment. The `unset ANTHROPIC_API_KEY` logic is preserved
+before launching Claude Code to avoid the "Both set" warning.
+
+### Auth Flow
+
+| Scenario | Auth used | `ANTHROPIC_API_KEY` export | Result |
+|----------|-----------|---------------------------|--------|
+| Shell startup | None (`CC_SWITCH_SKIP_ENV=1` guards) | Not loaded | No conflict |
+| `cc <model>` | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` | **Unset** before launch | No conflict |
+| `claude` directly | claude.ai OAuth or settings.json | Depends on env | Normal behavior |
 
 ### Auto-Add Models
 `cc <model>` automatically adds the model to `availableModels` if it's not already in the list. No need to run `cc-sync` first.
@@ -204,24 +206,62 @@ The `unset ANTHROPIC_API_KEY` is **intentional**: it prevents Claude Code's warn
 ### JSON Validation
 `settings.json` is validated as JSON on every read. If corrupt (empty, truncated, malformed), it's reset to `{"availableModels":[],"env":{}}`.
 
-## ⚠ claude.ai Auth Conflict
+## ⚠ Multi-Key Environment: Avoiding Auth Conflicts
 
-**Problem**: When both Claude Code CLI OAuth session and `ANTHROPIC_API_KEY` env var are present, Claude Code shows:
+### Problem
 
-> ⚠ Both claude.ai and ANTHROPIC_API_KEY set · auth may not work as expected
+When multiple auth variables coexist in the shell environment:
 
-**Solution**: `cc-switch` handles this automatically:
+```bash
+ANTHROPIC_API_KEY=***          # managed by automation tool
+ANTHROPIC_AUTH_TOKEN=***       # CPA proxy key (correct one)
+```
 
-- At shell startup, `CC_SWITCH_SKIP_ENV=1` (set in `.zshrc`) prevents auto-loading the API key — `claude` run directly uses claude.ai auth.
-- When `cc <model>` runs, it force-loads the env file and exports both `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` with the same key value. This ensures broad compatibility — some Claude Code versions prefer `API_KEY` over `AUTH_TOKEN`, and different build variants (e.g. Codex, CPA) may check one or the other.
+Claude Code may warn: `⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set`
+and may pick the wrong key.
 
-| Scenario | Auth sent | Result |
-|----------|-----------|--------|
-| Shell startup | None (guard active) | No conflict |
-| `cc <model>` | `ANTHROPIC_AUTH_TOKEN` → `Authorization: Bearer` — `ANTHROPIC_API_KEY` is unset | No conflict |
-| `claude` directly | claude.ai OAuth only | Normal behavior |
+### Solution
 
-> **Changelog (2026-06-25):** Previous versions used `unset ANTHROPIC_API_KEY` and only exported `ANTHROPIC_AUTH_TOKEN`, which broke Claude Code instances that depend on `ANTHROPIC_API_KEY` for authentication. The current version exports both, fixing the `✻ API error · Retrying in Xs` loop when using a local CPA proxy.
+cc-switch handles this with a three-layer approach:
+
+1. **Shell startup guard** (`CC_SWITCH_SKIP_ENV=1` in `.zshrc`): prevents
+   auto-loading the API key so `claude` run directly uses claude.ai OAuth.
+2. **Auth key priority** (v2.1+): reads `ANTHROPIC_AUTH_TOKEN` first,
+   then `ANTHROPIC_API_KEY`, then `settings.json`.
+3. **Unset before launch**: `ANTHROPIC_API_KEY` is unset before invoking
+   Claude Code, so the shell sees only `ANTHROPIC_AUTH_TOKEN`.
+
+### Scenario table
+
+| Scenario | Shell env before | Shell env at launch | Result |
+|----------|-----------------|---------------------|--------|
+| Shell startup | None (guard) | None | No conflict |
+| `cc <model>` | Both set | Only `AUTH_TOKEN` (API_KEY unset) | No conflict ✅ |
+| `claude` directly | Both set | Both set | ⚠ Warning (harmless if proxy accepts either key) |
+
+### Unified key management (recommended pattern)
+
+For setups with multiple key sources (automation tools + CPA proxy),
+use a single `.env` file as the source of truth:
+
+```
+# ~/.openclaw/.env
+CPA_API_KEY=***
+CLAUDE_CODE_BASE_URL=http://127.0.0.1:8317
+```
+
+And read only these two vars in `.zshrc` (avoid sourcing the whole file):
+
+```zsh
+__cc_url="$(grep '^CLAUDE_CODE_BASE_URL=' $HOME/.openclaw/.env | cut -d= -f2-)"
+__cc_key="$(grep '^CPA_API_KEY=' $HOME/.openclaw/.env | cut -d= -f2-)"
+export ANTHROPIC_BASE_URL="${__cc_url:-http://127.0.0.1:8317}"
+export ANTHROPIC_AUTH_TOKEN="***"
+unset __cc_url __cc_key
+```
+
+Updating credentials requires editing **one file**; all consumers
+(cc-switch, ccx, bare claude) pick up the change on next terminal start.
 
 ```bash
 ANTHROPIC_API_KEY=your-api-key-here
@@ -444,6 +484,39 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8317
 # Test and register models
 cc-menu cleaner test
 ```
+
+### CPA System Shim (port 8316)
+
+ccx (the cross-backend launcher used by `cc`) routes CPA traffic through a
+transparent system-message shim at port **8316**, which forwards to the real
+CPA proxy at **8317**.
+
+**Why this exists:** Claude Code v2.1.158+ sometimes injects `role: "system"`
+messages into the *middle* of the `messages` array (e.g. auto-loaded skills
+list). When CPA converts the Anthropic request to OpenAI format for strict
+upstreams (Qwen, DeepSeek, GLM, etc.), those non-leading system messages
+cause `400: System message must be at the beginning`.
+
+**What the shim does:** intercepts `POST /v1/messages`, hoists stray system
+messages out of the body and appends them to the top-level `system` field,
+then forwards the cleaned request to the real proxy:
+
+```
+Claude Code ──→ port 8316 (shim) ──→ port 8317 (CPA)
+                  │
+                  ↓ detect system message in middle of array
+                  ↓ extract → merge into top-level system field
+                  ↓ forward to 127.0.0.1:8317
+```
+
+| Port | Service | Role |
+|------|---------|------|
+| **8316** | `cpa-system-shim.py` | Transparent proxy — fixes system message ordering |
+| **8317** | CPA / CLIProxyAPI (Docker) | Real model proxy — routes to upstream APIs |
+
+Without the shim, `claude` pointed directly at port 8317 works for
+Anthropic models (sonnet, opus) but may fail on Qwen / DeepSeek / GLM
+models with `400` errors.
 
 See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
 
