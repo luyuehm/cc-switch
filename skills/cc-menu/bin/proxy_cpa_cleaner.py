@@ -3,6 +3,7 @@ import http.server
 import urllib.request
 import sys
 import os
+import time
 from pathlib import Path
 
 # ────────────────────────────────────────────────────────────
@@ -34,6 +35,235 @@ proxy_handler = urllib.request.ProxyHandler({})
 opener = urllib.request.build_opener(proxy_handler)
 urllib.request.install_opener(opener)
 
+# ────────────────────────────────────────────────────────────
+#  Task-based Smart Model Router (方案 B)
+# ────────────────────────────────────────────────────────────
+
+# Enable/disable smart routing via environment variable (default: on)
+CPA_SMART_ROUTING = os.environ.get("CPA_SMART_ROUTING", "true").lower() == "true"
+
+# Task → optimal model mapping. Each task can have a primary model and fallbacks.
+# When a model returns quota/rate-limit errors, the next fallback is tried.
+# All models are filtered against the CPA model list to ensure they actually exist.
+TASK_MODEL_MAP = {
+    "coding":  {"primary": "gpt-5.5",
+                "fallbacks": ["deepseek-v4-flash", "qwen3.6-plus"]},
+    "reason":  {"primary": "qwen3.6-plus",
+                "fallbacks": ["gpt-5.5", "deepseek-v4-flash"]},
+    "quick":   {"primary": "deepseek-v4-flash",
+                "fallbacks": ["gpt-5.5", "qwen3.6-plus"]},
+    "image":   {"primary": "gpt-5.5",
+                "fallbacks": ["deepseek-v4-flash"]},
+    "default": {"primary": None,
+                "fallbacks": []},   # Keep whatever model Claude Code sent
+}
+
+# ────────────────────────────────────────────────────────────
+#  CPA Model List Cache (from settings.json + /v1/models)
+# ────────────────────────────────────────────────────────────
+
+SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
+
+def _load_cpa_models():
+    """Load the CPA model list from settings.json availableModels."""
+    try:
+        if SETTINGS_PATH.exists():
+            cfg = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            models = cfg.get("availableModels", [])
+            if models:
+                return set(models)
+    except Exception as e:
+        print(f"[WARN] Failed to load settings.json: {e}")
+    return set()
+
+# Refresh the model list periodically
+_cpa_models = _load_cpa_models()
+_CPA_MODELS_LAST_REFRESH = time.time()
+
+def _refresh_cpa_models():
+    """Refresh the CPA model cache. Called every 60 seconds."""
+    global _cpa_models, _CPA_MODELS_LAST_REFRESH
+    now = time.time()
+    if now - _CPA_MODELS_LAST_REFRESH > 60:
+        _cpa_models = _load_cpa_models()
+        _CPA_MODELS_LAST_REFRESH = now
+
+def is_model_in_cpa(model):
+    """Check if a model exists in the CPA model list (case-insensitive)."""
+    _refresh_cpa_models()
+    if not _cpa_models:
+        return True  # no list available, allow all
+    return model.lower() in {m.lower() for m in _cpa_models}
+
+# ────────────────────────────────────────────────────────────
+#  Model Health Tracker (quota-aware)
+# ────────────────────────────────────────────────────────────
+
+# Tracks consecutive failures per model. After FAIL_THRESHOLD failures
+# in a row, the model is marked unhealthy and skipped.
+# Clears after HEALTH_RESET_SECONDS of no errors.
+
+FAIL_THRESHOLD = 3                          # Consecutive failures before marking unhealthy
+HEALTH_RESET_SECONDS = 120                  # Reset health after this many seconds
+_model_health = {}                           # model_name -> {"failures": int, "last_fail": float, "healthy": bool}
+
+
+def _ensure_health(model):
+    """Initialize health tracking for a model if not yet tracked."""
+    if model not in _model_health:
+        _model_health[model] = {"failures": 0, "last_fail": 0.0, "healthy": True}
+
+
+def is_model_healthy(model):
+    """Check if a model is healthy. Auto-recovers after HEALTH_RESET_SECONDS."""
+    _ensure_health(model)
+    h = _model_health[model]
+    if not h["healthy"]:
+        elapsed = time.time() - h["last_fail"]
+        if elapsed > HEALTH_RESET_SECONDS:
+            h["failures"] = 0
+            h["healthy"] = True
+            print(f"[HEALTH] {model} recovered after {elapsed:.0f}s cooldown")
+    return h["healthy"]
+
+
+def mark_model_failure(model):
+    """Record a model failure. Marks unhealthy after FAIL_THRESHOLD consecutive failures."""
+    _ensure_health(model)
+    h = _model_health[model]
+    h["failures"] += 1
+    h["last_fail"] = time.time()
+    if h["failures"] >= FAIL_THRESHOLD:
+        h["healthy"] = False
+        print(f"[HEALTH] {model} UNHEALTHY after {h['failures']} consecutive failures (quota/rate-limit)")
+    else:
+        print(f"[HEALTH] {model} failure {h['failures']}/{FAIL_THRESHOLD}")
+
+
+def mark_model_success(model):
+    """Record a model success. Resets failure counter."""
+    _ensure_health(model)
+    h = _model_health[model]
+    if h["failures"] > 0:
+        h["failures"] = 0
+        print(f"[HEALTH] {model} success, failure counter reset")
+
+
+def is_quota_error(error_code, error_body=""):
+    """Detect if an error is quota/rate-limit/insufficient related."""
+    if error_code in (429, 403, 402):
+        return True
+    quota_kws = ["quota", "insufficient", "rate limit", "rate_limit",
+                 "too many", "exhausted", "balance", "payment required",
+                 "insufficient_quota", "超出配额", "额度不足", "余额不足",
+                 "被限流", "rate limit exceeded", "limit reached"]
+    err_lower = error_body.lower()
+    return any(kw in err_lower for kw in quota_kws)
+
+
+def get_routed_model(task_type):
+    """Get the best healthy model for a task type.
+    Tries primary first, then fallbacks in order.
+    Filters against CPA model list (is_model_in_cpa).
+    Returns model name string, or None if all models are unhealthy.
+    """
+    mapping = TASK_MODEL_MAP.get(task_type, TASK_MODEL_MAP["default"])
+
+    candidates = []
+    if mapping["primary"]:
+        candidates.append(mapping["primary"])
+    candidates.extend(mapping["fallbacks"])
+
+    for model in candidates:
+        if model and is_model_healthy(model) and is_model_in_cpa(model):
+            return model
+
+    # All candidates unhealthy or not in CPA list — force-reset the primary
+    if mapping["primary"]:
+        if not is_model_in_cpa(mapping["primary"]):
+            print(f"[ROUTER] Primary {mapping['primary']} not in CPA model list, using original model")
+            return None
+        print(f"[HEALTH] All fallbacks unhealthy for task={task_type}, force-using primary {mapping['primary']}")
+        _ensure_health(mapping["primary"])
+        _model_health[mapping["primary"]]["healthy"] = True
+        _model_health[mapping["primary"]]["failures"] = 0
+        return mapping["primary"]
+    return None
+
+
+def classify_task(messages, system_text=""):
+    """Analyze conversation content to determine task type for optimal model routing.
+
+    Scans user messages and system prompt for keywords indicating what kind of
+    work is being requested, then returns a task type key into TASK_MODEL_MAP.
+    """
+    combined = (system_text or "").lower()
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    combined += " " + part.get("text", "").lower()
+        elif isinstance(content, str):
+            combined += " " + content.lower()
+
+    # Image generation keywords
+    if any(kw in combined for kw in
+           ["画图", "生成图片", "create image", "generate image",
+            "draw", "image of", "gpt-image", "illustrate", "visualize"]):
+        return "image"
+
+    # Strong reasoning / deep analysis (requires 2+ keyword matches)
+    reasoning_kws = ["分析", "analyze", "比较", "compare", "对比",
+                     "推理", "reason", "为什么", "why", "如何实现",
+                     "how to", "解释", "explain", "总结", "summarize",
+                     "deep think", "think step by step", "论证", "evaluate"]
+    if sum(1 for kw in reasoning_kws if kw in combined) >= 2:
+        return "reason"
+
+    # Coding / development work
+    if any(kw in combined for kw in
+           ["代码", "code", "写一个", "实现", "implement",
+            "function", "bug", "fix", "refactor", "debug",
+            "compile", "test", "deploy", "git", "api",
+            "endpoint", "database", "sql", "query", "pull request"]):
+        return "coding"
+
+    # Quick / simple tasks
+    if any(kw in combined for kw in
+           ["翻译", "translate", "convert", "hello", "hi", "简单"]):
+        return "quick"
+
+    return "default"
+
+
+def classify_and_route(body, messages, system_text):
+    """Apply smart routing: override model based on task classification + health.
+
+    Returns the (possibly modified) model name and logs the routing decision.
+    """
+    if not CPA_SMART_ROUTING:
+        return body.get("model", "")
+
+    original_model = body.get("model", "")
+    task_type = classify_task(messages, system_text)
+    smart_model = get_routed_model(task_type)
+
+    if smart_model:
+        body["model"] = smart_model
+        if smart_model != original_model:
+            print(f"[SMART ROUTER] Task={task_type} | {original_model} → {smart_model}")
+        else:
+            print(f"[SMART ROUTER] Task={task_type} | keep {smart_model} (healthy)")
+    else:
+        body["model"] = original_model
+        print(f"[SMART ROUTER] Task={task_type} | no route, keep {original_model}")
+
+    return body["model"]
+
+
 def translate_tools_to_openai(anth_tools):
     openai_tools = []
     for tool in anth_tools:
@@ -54,9 +284,9 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length))
             
-            model_name = body.get("model", "")
             is_stream = body.get("stream", False)
-            
+            model_name = body.get("model", "")
+
             # ──────────────────────────────────────────────────
             #  1. 消息合并与清洗 (CPA Cleaner)
             # ──────────────────────────────────────────────────
@@ -103,14 +333,24 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 combined_system = "\n\n".join([p for p in system_parts if p.strip()])
                 if combined_system:
                     cleaned_req["system"] = combined_system
-            
+
+            # ──────────────────────────────────────────────────
+            #  2a. 智能任务路由 (Smart Router — 方案 B)
+            #      Based on conversation content, override model
+            #      for optimal task-model fit. Modifies body["model"].
+            # ──────────────────────────────────────────────────
+            model_name = classify_and_route(body, other_messages, combined_system)
+
+            # Update cleaned_req with the (possibly routed) model
+            cleaned_req["model"] = model_name
+
             # 保留核心参数
             for field in ["max_tokens", "temperature", "stream", "tools", "tool_choice", "thinking", "output_config"]:
                 if field in body:
                     cleaned_req[field] = body[field]
 
             # ──────────────────────────────────────────────────
-            #  2. 动态多渠道路由选择 (Router)
+            #  2b. 动态多渠道路由选择 (Router)
             # ──────────────────────────────────────────────────
             # 判断 CPA 是否已配置 (非空且非默认占位符)
             cpa_url = os.environ.get("CPA_TARGET_URL", "").strip()
@@ -276,9 +516,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 try:
                     resp = urllib.request.urlopen(req, timeout=90)
                 except urllib.error.HTTPError as e:
+                    error_body = e.read().decode("utf-8", errors="replace")
+                    if is_quota_error(e.code, error_body):
+                        mark_model_failure(model_name)
+                        print(f"[QUOTA] {model_name} returned {e.code}, marked unhealthy")
                     self.send_response(e.code)
                     self.end_headers()
-                    self.wfile.write(e.read())
+                    self.wfile.write(error_body.encode())
                     return
                 except Exception as e:
                     import traceback
@@ -299,10 +543,13 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                 # 若是 OpenAI 格式，先向客户端推送 Anthropic 流式握手头部
                 if is_openai_route:
                     self.wfile.write(b'event: message_start\ndata: {"type": "message_start", "message": {"id": "msg_local_cleaner", "type": "message", "role": "assistant", "content": [], "model": "' + model_name.encode() + b'", "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 0, "output_tokens": 0}}}\n\n')
-                    self.wfile.write(b'event: content_block_start\ndata: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}\n\n')
+                    # 不在这里发送 content_block_start，而是在收到第一个 chunk 时动态发送
+                    # 这样可以根据是否有 reasoning_content 来决定发送 thinking block 还是 text block
                     self.wfile.flush()
                 
                 in_thinking = False
+                content_started = False
+                text_block_index = 0  # 0 if no thinking, 1 if thinking present
                 tool_states = {}
                 openai_usage = None
                 
@@ -327,28 +574,80 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                         content_chunk = delta.get("content", "")
                                         reasoning_chunk = delta.get("reasoning_content", "")
                                         
-                                        text_to_send = ""
-                                        if reasoning_chunk:
+                                        if reasoning_chunk and not content_started:
                                             if not in_thinking:
                                                 in_thinking = True
-                                                text_to_send += "<thinking>\n"
-                                            text_to_send += reasoning_chunk
-                                        elif content_chunk:
-                                            if in_thinking:
-                                                in_thinking = False
-                                                text_to_send += "\n</thinking>\n\n"
-                                            text_to_send += content_chunk
+                                                # 发送 thinking content_block_start
+                                                thinking_start = {
+                                                    "type": "content_block_start",
+                                                    "index": 0,
+                                                    "content_block": {
+                                                        "type": "thinking",
+                                                        "thinking": ""
+                                                    }
+                                                }
+                                                self.wfile.write(f"event: content_block_start\ndata: {json.dumps(thinking_start)}\n\n".encode("utf-8"))
+                                                self.wfile.flush()
                                             
-                                        if text_to_send:
-                                            anth_chunk = {
+                                            # 发送 thinking delta
+                                            thinking_delta = {
                                                 "type": "content_block_delta",
                                                 "index": 0,
                                                 "delta": {
-                                                    "type": "text_delta",
-                                                    "text": text_to_send
+                                                    "type": "thinking_delta",
+                                                    "thinking": reasoning_chunk
                                                 }
                                             }
-                                            self.wfile.write(f"event: content_block_delta\ndata: {json.dumps(anth_chunk)}\n\n".encode("utf-8"))
+                                            self.wfile.write(f"event: content_block_delta\ndata: {json.dumps(thinking_delta)}\n\n".encode("utf-8"))
+                                            self.wfile.flush()
+                                            
+                                        elif content_chunk:
+                                            content_started = True
+                                            if in_thinking:
+                                                in_thinking = False
+                                                text_block_index = 1
+                                                # 关闭 thinking block
+                                                thinking_stop = {
+                                                    "type": "content_block_stop",
+                                                    "index": 0
+                                                }
+                                                self.wfile.write(f"event: content_block_stop\ndata: {json.dumps(thinking_stop)}\n\n".encode("utf-8"))
+                                                self.wfile.flush()
+                                                
+                                                # 开启 text block
+                                                text_start = {
+                                                    "type": "content_block_start",
+                                                    "index": 1,
+                                                    "content_block": {
+                                                        "type": "text",
+                                                        "text": ""
+                                                    }
+                                                }
+                                                self.wfile.write(f"event: content_block_start\ndata: {json.dumps(text_start)}\n\n".encode("utf-8"))
+                                                self.wfile.flush()
+                                            elif text_block_index == 0 and not any(s["started"] for s in tool_states.values()):
+                                                # 第一次收到 content，且没有 thinking，开启 text block
+                                                text_start = {
+                                                    "type": "content_block_start",
+                                                    "index": 0,
+                                                    "content_block": {
+                                                        "type": "text",
+                                                        "text": ""
+                                                    }
+                                                }
+                                                self.wfile.write(f"event: content_block_start\ndata: {json.dumps(text_start)}\n\n".encode("utf-8"))
+                                                self.wfile.flush()
+                                            
+                                            # 发送 text delta
+                                            text_delta = {
+                                                "type": "content_block_delta",
+                                                "index": text_block_index,
+                                                "delta": {
+                                                    "type": "text_delta",
+                                                    "text": content_chunk
+                                                }
+                                            }
+                                            self.wfile.write(f"event: content_block_delta\ndata: {json.dumps(text_delta)}\n\n".encode("utf-8"))
                                             self.wfile.flush()
                                             
                                         # 处理流式 tool_calls
@@ -366,9 +665,10 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                                 
                                             if state["id"] and state["name"] and not state["started"]:
                                                 state["started"] = True
+                                                # Tool calls start at index 2 (thinking=0, text=1)
                                                 anth_start = {
                                                     "type": "content_block_start",
-                                                    "index": 1 + tc_idx,
+                                                    "index": 2 + tc_idx,
                                                     "content_block": {
                                                         "type": "tool_use",
                                                         "id": state["id"],
@@ -387,7 +687,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                                     state["started"] = True
                                                     anth_start = {
                                                         "type": "content_block_start",
-                                                        "index": 1 + tc_idx,
+                                                        "index": 2 + tc_idx,
                                                         "content_block": {
                                                             "type": "tool_use",
                                                             "id": state["id"],
@@ -401,7 +701,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                                 state["accumulated_args"] += args_delta
                                                 anth_delta = {
                                                     "type": "content_block_delta",
-                                                    "index": 1 + tc_idx,
+                                                    "index": 2 + tc_idx,
                                                     "delta": {
                                                         "type": "input_json_delta",
                                                         "partial_json": args_delta
@@ -418,27 +718,30 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                             self.wfile.write(line)
                             self.wfile.flush()
                             
+                # Stream completed successfully — mark model healthy
+                mark_model_success(model_name)
+
                 # 若是 OpenAI 格式，流结束时推送 Anthropic 流收尾事件
                 if is_openai_route:
+                    # 关闭最后一个 content block
                     if in_thinking:
-                        anth_chunk = {
-                            "type": "content_block_delta",
-                            "index": 0,
-                            "delta": {
-                                "type": "text_delta",
-                                "text": "\n</thinking>\n\n"
-                            }
+                        # 关闭 thinking block (index 0)
+                        thinking_stop = {
+                            "type": "content_block_stop",
+                            "index": 0
                         }
-                        self.wfile.write(f"event: content_block_delta\ndata: {json.dumps(anth_chunk)}\n\n".encode("utf-8"))
+                        self.wfile.write(f"event: content_block_stop\ndata: {json.dumps(thinking_stop)}\n\n".encode("utf-8"))
                         self.wfile.flush()
-                    self.wfile.write(b'event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}\n\n')
-                    self.wfile.flush()
+                    else:
+                        # 关闭 text block
+                        self.wfile.write(f'event: content_block_stop\ndata: {{"type": "content_block_stop", "index": {text_block_index}}}\n\n'.encode("utf-8"))
+                        self.wfile.flush()
                     
                     for tc_idx, state in tool_states.items():
                         if state["started"]:
                             anth_stop = {
                                 "type": "content_block_stop",
-                                "index": 1 + tc_idx
+                                "index": 2 + tc_idx
                             }
                             self.wfile.write(f"event: content_block_stop\ndata: {json.dumps(anth_stop)}\n\n".encode("utf-8"))
                             self.wfile.flush()
@@ -482,9 +785,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                                 msg_obj = choices[0].get("message", {})
                                 content_text = msg_obj.get("content", "") or ""
                                 reasoning_text = msg_obj.get("reasoning_content", "") or ""
-                                if reasoning_text:
-                                    content_text = f"<thinking>\n{reasoning_text}\n</thinking>\n\n{content_text}"
                                 
+                                # 如果有 reasoning_content，创建 thinking content block
+                                if reasoning_text:
+                                    anth_content.append({
+                                        "type": "thinking",
+                                        "thinking": reasoning_text
+                                    })
+                                
+                                # 添加 text content block
                                 if content_text:
                                     anth_content.append({
                                         "type": "text",
@@ -534,10 +843,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                         self.send_header("Content-Length", str(len(resp_data)))
                         self.end_headers()
                         self.wfile.write(resp_data)
+                        mark_model_success(model_name)
                 except urllib.error.HTTPError as e:
+                    error_body = e.read().decode("utf-8", errors="replace")
+                    if is_quota_error(e.code, error_body):
+                        mark_model_failure(model_name)
+                        print(f"[QUOTA] {model_name} returned {e.code}, marked unhealthy")
                     self.send_response(e.code)
                     self.end_headers()
-                    self.wfile.write(e.read())
+                    self.wfile.write(error_body.encode())
                 
         except Exception as e:
             import traceback

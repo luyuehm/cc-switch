@@ -291,6 +291,13 @@ cc
 cc gpt-5.5
 cc claude-sonnet-4
 
+# Task-smart launch (auto-selects best model for the job)
+cc-run code         # coding → claude-sonnet-4.6
+cc-run quick        # fast   → deepseek-v4-flash
+cc-run reason       # deep analysis → gpt-5.6-sol
+cc-run image        # image gen → gpt-image-2
+cc-run gpt-5.5      # or pass any model name directly
+
 # Quick shortcuts
 cc-pro         # claude-opus-4-7
 cc-fast        # deepseek-v4-flash
@@ -301,6 +308,10 @@ cc-sync              # fetch and diff
 cc-sync -List        # show full CPA model list only
 cc-sync -Force       # auto-add new models
 cc-sync -Remove      # auto-remove obsolete models
+
+# Test model health/quota
+cc-test              # test all models for availability
+cc-test -RemoveDead  # auto-remove failed models
 
 # Skill menu management
 cc-audit             # full visibility report
@@ -470,9 +481,21 @@ if (Test-Path "C:\tools\zoxide.exe") { ... }
 
 ---
 
-## Advanced: CPA Cleaner Proxy
+## Advanced: CPA Cleaner Proxy + Smart Router
 
-cc-switch includes cc-menu's CPA Cleaner for advanced routing:
+cc-switch includes cc-menu's CPA Cleaner with **intelligent task-based model routing** (方案 B).
+
+When enabled, the proxy analyzes each request's content and automatically routes to the optimal model:
+
+| Task Type | Routed Model | Trigger Keywords |
+|-----------|-------------|-----------------|
+| `coding` | claude-sonnet-4.6 | code, implement, bug, fix, git, api, sql, deploy |
+| `reason` | gpt-5.6-sol | analyze, compare, explain, evaluate, think step by step |
+| `image` | gpt-image-2 | draw, create image, generate image, illustrate |
+| `quick` | deepseek-v4-flash | translate, convert, hello, simple |
+| `default` | keep original model | everything else |
+
+### Setup
 
 ```powershell
 # Start local proxy (port 8317)
@@ -532,43 +555,47 @@ If both are present, Claude Code warns:
 ⚠ Both ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY set · auth may not work as expected
 ```
 
-**Root cause:** The `set_api_key` parameter in the backend configuration controls
-whether the overlay includes `ANTHROPIC_API_KEY`:
+**Solution:** read the key first, then strip `ANTHROPIC_API_KEY` from the
+environment before `exec`/`execvp`, exporting only `ANTHROPIC_AUTH_TOKEN`.
 
-```python
-BACKENDS = {
-    "cpa": {
-        "set_api_key": False,   # only AUTH_TOKEN in overlay → API_KEY leaks from env
-    },
-    "kiro": {
-        "set_api_key": True,    # both in overlay → no leak
-    },
-}
-```
+### Disable Smart Routing
 
-When `set_api_key: False`, the overlay only provides `ANTHROPIC_AUTH_TOKEN`.
-The shell env's `ANTHROPIC_API_KEY` (managed by automation) passes through
-uncovered, and Claude Code sees two keys.
-
-**Solution:** `cc-switch.sh` handles this automatically — it reads
-`ANTHROPIC_AUTH_TOKEN` first (v2.1+), then **unsets** `ANTHROPIC_API_KEY`
-from the shell environment before launching Claude Code:
+Set environment variable to disable content-based routing (uses model name as-is):
 
 ```bash
-# cc-switch.sh v2.1+ pseudocode:
-# 1. Read key (AUTH_TOKEN first)
-auth_key="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
-# 2. Unset the conflicting env var
-unset ANTHROPIC_API_KEY
-# 3. Export only AUTH_TOKEN
-export ANTHROPIC_AUTH_TOKEN="$auth_key"
-# 4. Launch Claude Code
-eval "$claude_bin"
+CPA_SMART_ROUTING=false
 ```
 
-If you use a different launcher (ccx, custom script), apply the same
-pattern: read the key first, then strip `ANTHROPIC_API_KEY` from the
-environment before `exec`/`execvp`.
+### How It Works
+
+```
+Claude Code (always sends "deepseek-v4-flash")
+    ↓
+Smart Router Proxy (localhost:8317)
+    ↓ analyzes messages content
+    ├── "fix this bug"      → model=claude-sonnet-4.6 → CPA
+    ├── "画一只猫"           → model=gpt-image-2       → CPA
+    ├── "分析这两个方案"     → model=gpt-5.6-sol       → CPA
+    └── "hello world"       → model=deepseek-v4-flash  → CPA
+    ↓
+aws.richant.edu.kg
+```
+
+All routing happens transparently — you just talk to Claude Code normally.
+
+### Quota-Aware Fallback
+
+The proxy tracks model health in real-time:
+
+- **3 consecutive quota errors** (HTTP 429/403/402, or keywords like "额度不足", "rate limit", "insufficient_quota") → model marked **unhealthy**
+- Subsequent requests skip unhealthy models and try the **next fallback** in order
+- After **120 seconds** of no errors, the model **auto-recovers** and is tried again
+- Each task type has its own fallback chain (see `TASK_MODEL_MAP` in `proxy_cpa_cleaner.py`)
+
+Example fallback chain for `coding` task:
+```
+claude-sonnet-4.6 (primary) → gpt-5.5 → deepseek-v4-flash → qwen3.6-plus
+```
 
 See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
 

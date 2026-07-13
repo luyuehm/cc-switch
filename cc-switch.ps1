@@ -121,6 +121,45 @@ function global:cc-pro {
     cc claude-opus-4-7
 }
 
+function global:cc-run {
+    <#
+    .SYNOPSIS
+        Launch Claude Code with a task-appropriate model. Maps task types to optimal models.
+    .PARAMETER Task
+        Task type or model name. Built-in types:
+          code    → claude-sonnet-4.6    (best for coding)
+          quick   → deepseek-v4-flash    (fast/cheap for simple tasks)
+          reason  → gpt-5.6-sol          (strong reasoning/analysis)
+          image   → gpt-image-2          (image generation)
+          default → deepseek-v4-flash    (general purpose)
+        Or pass any model name directly (e.g., "qwen3.6-max-preview").
+    .EXAMPLE
+        cc-run code           # start with coding-optimized model
+        cc-run quick          # start with fast model
+        cc-run reason         # start with strong reasoning model
+        cc-run gpt-5.5        # start with specific model
+    #>
+    param([string]$Task = "default")
+
+    $modelMap = @{
+        code    = "gpt-5.5"             # Best for coding (verified)
+        quick   = "deepseek-v4-flash"   # Fast/cheap (verified)
+        reason  = "qwen3.6-plus"        # Strong reasoning (verified)
+        image   = "gpt-5.5"             # Image gen not available, fallback
+        default = "deepseek-v4-flash"   # General purpose (verified)
+    }
+
+    if ($modelMap.ContainsKey($Task)) {
+        $model = $modelMap[$Task]
+        Write-Host "[cc-run] Task '$Task' → model: $model" -ForegroundColor Cyan
+    } else {
+        $model = $Task
+        Write-Host "[cc-run] Direct model: $model" -ForegroundColor Cyan
+    }
+
+    cc $model
+}
+
 function global:cc-fast {
     Write-Host "Switching to deepseek-v4-flash..." -ForegroundColor Cyan
     cc deepseek-v4-flash
@@ -308,9 +347,139 @@ function global:cc-sync {
     Write-Host "Tip: cc-sync -Remove   — remove obsolete models" -ForegroundColor Gray
 }
 
-# ===========================================================================
-# CC-MENU INTEGRATION — Skill menu management (audit/hide/show/profile)
-# ===========================================================================
+function global:cc-test {
+    <#
+    .SYNOPSIS
+        Test all available models for quota/availability by sending a short ping.
+        Reports healthy vs unhealthy models and optionally removes dead ones.
+    .PARAMETER RemoveDead
+        Remove models that fail the test from availableModels.
+    .PARAMETER Timeout
+        Seconds to wait per model test (default 15).
+    .PARAMETER Parallel
+        Number of parallel tests (default 5).
+    #>
+    param(
+        [switch]$RemoveDead,
+        [int]$Timeout = 15,
+        [int]$Parallel = 5
+    )
+
+    $json = Get-CCSettings
+    if (-not $json -or -not $json.availableModels -or $json.availableModels.Count -eq 0) {
+        Write-Host "Error: no availableModels in settings.json" -ForegroundColor Red
+        return
+    }
+
+    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else { $json.env.ANTHROPIC_BASE_URL }
+    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else { $json.env.ANTHROPIC_API_KEY }
+
+    if (-not $baseUrl -or -not $apiKey) {
+        Write-Host "Error: ANTHROPIC_BASE_URL or API key not configured." -ForegroundColor Red
+        return
+    }
+
+    $headers = @{
+        "Content-Type" = "application/json"
+        "x-api-key" = $apiKey
+        "anthropic-version" = "2023-06-01"
+    }
+    # For CPA endpoints, use Bearer auth
+    $headers["Authorization"] = "Bearer $apiKey"
+
+    $models = $json.availableModels
+    $total = $models.Count
+    $current = 0
+
+    Write-Host ""
+    Write-Host "=== Model Health Test ===" -ForegroundColor Cyan
+    Write-Host "  Models : $total"
+    Write-Host "  Endpoint: $baseUrl"
+    Write-Host "  Timeout: ${Timeout}s per model"
+    Write-Host "  Parallel: $Parallel"
+    Write-Host ""
+
+    $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
+
+    $models | ForEach-Object -Parallel {
+        $modelName = $_
+        $baseUrl = $using:baseUrl
+        $headers = $using:headers
+        $timeout = $using:Timeout
+        $results = $using:results
+
+        $body = @{
+            model    = $modelName
+            messages = @(@{ role = "user"; content = "ping" })
+            max_tokens = 5
+        } | ConvertTo-Json
+
+        try {
+            $response = Invoke-RestMethod -Uri "$baseUrl/v1/messages" `
+                -Method Post `
+                -Headers $headers `
+                -Body $body `
+                -ContentType "application/json" `
+                -TimeoutSec $timeout `
+                -ErrorAction Stop
+
+            $results.Add(@{ model = $modelName; status = "healthy" })
+            Write-Host "  [OK]  $modelName" -ForegroundColor Green
+        } catch {
+            $statusCode = 0
+            $errorMsg = $_.Exception.Message
+            if ($_.Exception.Response) {
+                $statusCode = [int]$_.Exception.Response.StatusCode
+            }
+
+            if ($statusCode -in (429, 403, 402) -or $errorMsg -match "quota|insufficient|rate.limit|额度不足|超出配额|余额不足") {
+                $results.Add(@{ model = $modelName; status = "quota" })
+                Write-Host "  [QUOTA]  $modelName (HTTP $statusCode)" -ForegroundColor Yellow
+            } else {
+                $results.Add(@{ model = $modelName; status = "failed" })
+                Write-Host "  [FAIL]  $modelName (HTTP $statusCode)" -ForegroundColor Red
+            }
+        }
+    } -ThrottleLimit $Parallel
+
+    $healthy   = @($results | Where-Object { $_.status -eq "healthy" } | ForEach-Object { $_.model })
+    $quotaErrors = @($results | Where-Object { $_.status -eq "quota" } | ForEach-Object { $_.model })
+    $unhealthy = @($results | Where-Object { $_.status -eq "failed" } | ForEach-Object { $_.model })
+
+    Write-Host ""
+    Write-Host "=== Test Results ===" -ForegroundColor Cyan
+    Write-Host "  Healthy   : $($healthy.Count) / $total" -ForegroundColor Green
+    Write-Host "  Quota-Low : $($quotaErrors.Count) / $total" -ForegroundColor Yellow
+    Write-Host "  Failed    : $($unhealthy.Count) / $total" -ForegroundColor Red
+
+    if ($healthy.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Healthy models:" -ForegroundColor Green
+        $healthy | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
+    }
+    if ($quotaErrors.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Quota exhausted (may recover later):" -ForegroundColor Yellow
+        $quotaErrors | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
+    }
+    if ($unhealthy.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Failed (likely unavailable):" -ForegroundColor Red
+        $unhealthy | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+    }
+
+    if ($RemoveDead -and $unhealthy.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Removing $($unhealthy.Count) failed models from availableModels..." -ForegroundColor Yellow
+        $json.availableModels = @($json.availableModels | Where-Object { $_ -notin $unhealthy })
+        Save-CCSettings $json
+        Write-Host "[OK]  Removed $($unhealthy.Count) models. Remaining: $($json.availableModels.Count)" -ForegroundColor Green
+    }
+
+    Write-Host ""
+    Write-Host "Tip: cc-test -RemoveDead   — remove failed models from list" -ForegroundColor Gray
+    Write-Host "Tip: cc-test -Timeout 30   — increase timeout for slow models" -ForegroundColor Gray
+}
 
 function global:cc-audit {
     <#
@@ -706,6 +875,12 @@ function Show-CCMenu {
     Write-Host ""
     Write-Host "=== Claude Code Model Switcher ===" -ForegroundColor Cyan
     Write-Host ""
+    Write-Host "  cc-run <task>      Task-smart launch (code|quick|reason|image)" -ForegroundColor White
+    Write-Host "    cc-run code      Coding (gpt-5.5)" -ForegroundColor Gray
+    Write-Host "    cc-run quick     Fast (deepseek-v4-flash)" -ForegroundColor Gray
+    Write-Host "    cc-run reason    Deep analysis (qwen3.6-plus)" -ForegroundColor Gray
+    Write-Host "    cc-run image     Image gen (gpt-5.5 fallback)" -ForegroundColor Gray
+    Write-Host ""
     Write-Host "  cc <model>         Switch and launch" -ForegroundColor White
     Write-Host "  cc                 This menu" -ForegroundColor White
     Write-Host "  cc-status          Full model inventory" -ForegroundColor White
@@ -713,6 +888,8 @@ function Show-CCMenu {
     Write-Host "    cc-sync -List    Show full CPA model list" -ForegroundColor Gray
     Write-Host "    cc-sync -Force   Auto-add new models" -ForegroundColor Gray
     Write-Host "    cc-sync -Remove  Remove obsolete models" -ForegroundColor Gray
+    Write-Host "  cc-test            Test all models for quota/health" -ForegroundColor White
+    Write-Host "    cc-test -RemoveDead  Auto-remove failed models" -ForegroundColor Gray
     Write-Host ""
     Write-Host "  cc-audit           Audit skill visibility" -ForegroundColor White
     Write-Host "  cc-hide <skill>    Hide skill or plugin" -ForegroundColor White

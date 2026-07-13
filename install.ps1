@@ -86,7 +86,8 @@ if (Get-Module -ListAvailable -Name Terminal-Icons) {
 
 # zoxide (smart cd)
 if (Test-Path "C:\tools\zoxide.exe") {
-    & "C:\tools\zoxide.exe" init pwsh | Invoke-Expression
+    $env:Path += ";C:\tools"
+    Invoke-Expression (& { (C:\tools\zoxide.exe init powershell | Out-String) })
 }
 
 # cc-switch core
