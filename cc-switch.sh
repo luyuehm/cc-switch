@@ -79,6 +79,47 @@ __cc_get_current_model() {
   echo "$json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('env',{}).get('ANTHROPIC_MODEL','(unknown)'))"
 }
 
+# === MODEL CATEGORIZATION HELPER (shared Python snippet) ===
+# Usage: echo '<each-model-on-separate-line>' | __cc_categorize_models [--verbose]
+# --verbose: bracket format (e.g. "[GPT]:\n    model1\n    model2")
+# default: compact format (e.g. "GPT: model1  model2")
+__cc_categorize_models() {
+  local verbose=0
+  [[ "$1" == "--verbose" ]] && verbose=1
+  python3 -c "
+import sys
+models = [l.strip() for l in sys.stdin if l.strip()]
+
+def get_cat(m):
+    if m.startswith('gpt-') or m.startswith('o'): return 'GPT'
+    if m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): return 'Claude'
+    if m.startswith('deepseek'): return 'DeepSeek'
+    if m.startswith('qwen'): return 'Qwen'
+    if m.startswith('grok'): return 'Grok'
+    if m.startswith('kimi') or m.startswith('moonshot'): return 'Moonshot'
+    if m.startswith('llama'): return 'Llama'
+    if m.startswith('mistral') or m.startswith('mixtral'): return 'Mistral'
+    if m.startswith('gemin'): return 'Gemini'
+    if 'step' in m.lower(): return 'Stepfun'
+    return 'Other'
+
+cats = {}
+for m in models:
+    cat = get_cat(m)
+    cats.setdefault(cat, []).append(m)
+
+order = {'GPT':1,'Claude':2,'DeepSeek':3,'Grok':4,'Qwen':5,'Gemini':6,'Moonshot':7,'Llama':8,'Mistral':9,'Stepfun':10,'Other':99}
+verbose = $verbose
+for cat in sorted(cats.keys(), key=lambda c: order.get(c,99)):
+    if verbose:
+        print(f'  [{cat}]')
+        for m in sorted(cats[cat]):
+            print(f'    {m}')
+    else:
+        print(f'{cat}: ' + '  '.join(sorted(cats[cat])))
+"
+}
+
 # === MAIN COMMAND ===
 cc() {
   local model="${1:-}"
@@ -328,39 +369,7 @@ for m in sorted(d.get('availableModels',[])):
   echo ""
   echo "=== CPA Model List ==="
 
-  echo "$cpa_models" | python3 -c "
-import sys
-models=[l.strip() for l in sys.stdin if l.strip()]
-cats={}
-for m in models:
-    if m.startswith('gpt-') or m.startswith('o'):
-        cat='GPT'
-    elif m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'):
-        cat='Claude'
-    elif m.startswith('deepseek'):
-        cat='DeepSeek'
-    elif m.startswith('qwen'):
-        cat='Qwen'
-    elif m.startswith('grok'):
-        cat='Grok'
-    elif m.startswith('llama'):
-        cat='Llama'
-    elif m.startswith('mistral') or m.startswith('mixtral'):
-        cat='Mistral'
-    elif m.startswith('gemin'):
-        cat='Gemini'
-    elif m.startswith('kimi') or m.startswith('moonshot'):
-        cat='Moonshot'
-    elif 'step' in m:
-        cat='Stepfun'
-    else:
-        cat='Other'
-    cats.setdefault(cat, []).append(m)
-for cat in sorted(cats.keys(), key=lambda c: {'GPT':1,'Claude':2,'DeepSeek':3,'Grok':4,'Qwen':5,'Gemini':6,'Moonshot':7,'Llama':8,'Mistral':9,'Stepfun':10}.get(c,99)):
-    print(f'  [{cat}]')
-    for m in cats[cat]:
-        print(f'    {m}')
-"
+  echo "$cpa_models" | __cc_categorize_models --verbose
 
   echo ""
   echo -n "Press Enter to continue, or type 'q' to cancel sync: "
@@ -771,17 +780,27 @@ import json,sys
 d=json.load(sys.stdin)
 current='$current'
 models=d.get('availableModels',[])
-groups={'GPT':[],'Claude':[],'DeepSeek':[],'Qwen':[],'Grok':[],'Moonshot':[],'Stepfun':[],'Other':[]}
+
+def get_cat(m):
+    if m.startswith('gpt-') or m.startswith('o'): return 'GPT'
+    if m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): return 'Claude'
+    if m.startswith('deepseek'): return 'DeepSeek'
+    if m.startswith('qwen'): return 'Qwen'
+    if m.startswith('grok'): return 'Grok'
+    if m.startswith('kimi') or m.startswith('moonshot'): return 'Moonshot'
+    if m.startswith('llama'): return 'Llama'
+    if m.startswith('mistral') or m.startswith('mixtral'): return 'Mistral'
+    if m.startswith('gemin'): return 'Gemini'
+    if 'step' in m.lower(): return 'Stepfun'
+    return 'Other'
+
+groups = {}
 for m in models:
-    if m.startswith('gpt-') or m.startswith('o'): groups['GPT'].append(m)
-    elif 'claude' in m.lower(): groups['Claude'].append(m)
-    elif 'deepseek' in m.lower(): groups['DeepSeek'].append(m)
-    elif 'qwen' in m.lower(): groups['Qwen'].append(m)
-    elif m.startswith('grok'): groups['Grok'].append(m)
-    elif 'moonshot' in m.lower(): groups['Moonshot'].append(m)
-    elif 'step' in m.lower(): groups['Stepfun'].append(m)
-    else: groups['Other'].append(m)
-for gname in sorted(groups.keys(), key=lambda g: len(groups[g]), reverse=True):
+    cat = get_cat(m)
+    groups.setdefault(cat, []).append(m)
+
+order = {'GPT':1,'Claude':2,'DeepSeek':3,'Grok':4,'Qwen':5,'Gemini':6,'Moonshot':7,'Llama':8,'Mistral':9,'Stepfun':10,'Other':99}
+for gname in sorted(groups.keys(), key=lambda g: order.get(g,99)):
     if groups[gname]:
         print(f'{gname} ({len(groups[gname])})')
         for m in sorted(groups[gname]):
@@ -825,23 +844,7 @@ __cc_show_menu() {
   echo "$json" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-models=d.get('availableModels',[]) or []
-cats={}
-for m in models:
-    if m.startswith('gpt-') or m.startswith('o'): cat='GPT'
-    elif 'claude' in m.lower(): cat='Claude'
-    elif 'deepseek' in m.lower(): cat='DeepSeek'
-    elif 'qwen' in m.lower(): cat='Qwen'
-    elif m.startswith('grok'): cat='Grok'
-    elif 'kimi' in m.lower() or 'moonshot' in m.lower(): cat='Moonshot'
-    elif 'llama' in m.lower(): cat='Llama'
-    elif 'mistral' in m.lower() or 'mixtral' in m.lower(): cat='Mistral'
-    elif 'gemin' in m.lower(): cat='Gemini'
-    elif 'step' in m.lower(): cat='Stepfun'
-    else: cat='Other'
-    cats.setdefault(cat, []).append(m)
-order={'GPT':1,'Claude':2,'DeepSeek':3,'Grok':4,'Qwen':5,'Gemini':6,'Moonshot':7,'Llama':8,'Mistral':9,'Stepfun':10,'Other':99}
-for cat in sorted(cats.keys(), key=lambda c: order.get(c,99)):
-    print(f\"{cat}: \"+'  '.join(cats[cat]))
-" 2>/dev/null
+for m in sorted(d.get('availableModels',[]) or []):
+    print(m)
+" 2>/dev/null | __cc_categorize_models
 }

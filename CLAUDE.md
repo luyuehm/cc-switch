@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-### Core Script (`cc-switch.ps1`) — 941 lines
+### Core Script (`cc-switch.ps1`) — ~1390 lines
 
 Single PowerShell file. All functions are `global:` scope for availability after dot-sourcing. No build step.
 
@@ -17,14 +17,25 @@ Single PowerShell file. All functions are `global:` scope for availability after
 2. `Get-CCSettings` / `Save-CCSettings` — read/write `~/.claude/settings.json` (ConvertFrom-Json, depth 10)
 3. `Find-ClaudeExe` — searches `~/.local/bin/claude.exe`, then `LOCALAPPDATA`, then `APPDATA/npm`
 
-**CPA auto-discovery (new):**
+**Model categorization helpers:**
+- `Get-ModelCategory` — single source of truth for vendor prefix regex (centralized, used by 6+ functions)
+- `Group-ModelsByCategory` — batch categorize a list into `@{ "GPT" = [...], "Claude" = [...] }` hashtable
+- `Get-CategorySortOrder` — deterministic display order for vendor categories
+
+**Health cache:**
+- `$script:CC_HEALTH_CACHE` — in-memory cache with 60s TTL, avoids redundant API pings
+- `Test-ModelHealth` — checks cache first, then pings API, caches result
+- `Select-HealthyModel` — sequential testing with early exit (tests in priority order, stops at first healthy). Uses cache to skip previously-failed models. **Greatly reduces API calls compared to old parallel-all approach.**
+- `Clear-StaleHealthCache` — purges expired entries before a fresh auto-assign
+
+**CPA auto-discovery:**
 - `Get-CPAModelList` — fetches model list from CPA endpoint, shared by `cc`, `cc-sync`, and `Invoke-CCAutoAssign`
-- `Invoke-CCAutoAssign` — categorizes models by vendor prefix, then intelligently assigns the best model to each task type:
-  - `code` → Claude first, then GPT, then Qwen
-  - `reason` → GPT sol/reasoning variants, then Qwen Plus/Max, then Claude
-  - `quick` → DeepSeek first, then mini/flash variants
-  - `image` → image-specific models, fallback to GPT
-  - `default` → GPT first, then DeepSeek, then Claude
+- `Invoke-CCAutoAssign` — categorizes models by vendor prefix via `Group-ModelsByCategory`, then intelligently assigns the best model to each task type (sequential health probing with shared cache across task groups):
+  - `code` → Claude non-haiku → Claude → GPT → Qwen → anything
+  - `reason` → GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything
+  - `quick` → DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything
+  - `image` → image-specific → GPT → Grok image → anything
+  - `default` → GPT → DeepSeek → Claude → Qwen → anything
 - Results saved to `settings.json → taskModels`
 
 **Command functions (all callable after dot-sourcing):**

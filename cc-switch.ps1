@@ -81,6 +81,103 @@ function Resolve-CPAEndpoint {
     return @{ Url = $cpaUrl; ApiKey = $apiKey }
 }
 
+# === MODEL CATEGORIZATION HELPERS ===
+
+<#
+.SYNOPSIS
+    Classify a model name into a vendor category string.
+    Centralized to avoid regex duplication across 5+ functions.
+#>
+function Get-ModelCategory {
+    param([string]$ModelName)
+    if ($ModelName -imatch "^(gpt|o\d)") { return "GPT" }
+    if ($ModelName -imatch "^claude|^sonnet|^haiku") { return "Claude" }
+    if ($ModelName -imatch "^deepseek") { return "DeepSeek" }
+    if ($ModelName -imatch "^qwen") { return "Qwen" }
+    if ($ModelName -imatch "^grok") { return "Grok" }
+    if ($ModelName -imatch "^llama") { return "Llama" }
+    if ($ModelName -imatch "^mistral|^mixtral") { return "Mistral" }
+    if ($ModelName -imatch "^gemin") { return "Gemini" }
+    if ($ModelName -imatch "^kimi|^moonshot") { return "Moonshot" }
+    if ($ModelName -imatch "step") { return "Stepfun" }
+    return "Other"
+}
+
+<#
+.SYNOPSIS
+    Categorize a list of models into a hashtable keyed by vendor category.
+    Each key maps to a sorted array of model names.
+#>
+function Group-ModelsByCategory {
+    param([string[]]$ModelList)
+    $groups = @{}
+    foreach ($m in $ModelList) {
+        $cat = Get-ModelCategory -ModelName $m
+        if (-not $groups.ContainsKey($cat)) { $groups[$cat] = [System.Collections.ArrayList]@() }
+        $null = $groups[$cat].Add($m)
+    }
+    # Sort each group (iterate over a copy of keys to avoid collection-modified error)
+    $keys = @($groups.Keys)
+    foreach ($k in $keys) {
+        $groups[$k] = @($groups[$k] | Sort-Object)
+    }
+    return $groups
+}
+
+<#
+.SYNOPSIS
+    Get a deterministic sort order for vendor categories (used in display).
+#>
+function Get-CategorySortOrder {
+    return @{
+        "GPT" = 1; "Claude" = 2; "DeepSeek" = 3; "Grok" = 4
+        "Qwen" = 5; "Gemini" = 6; "Moonshot" = 7; "Llama" = 8
+        "Mistral" = 9; "Stepfun" = 10; "Other" = 99
+    }
+}
+
+# === HEALTH CACHE ===
+
+$script:CC_HEALTH_CACHE = @{}
+$script:CC_HEALTH_CACHE_TTL = 60  # seconds
+
+<#
+.SYNOPSIS
+    Get cached health status for a model, or $null if expired or not cached.
+#>
+function Get-CachedHealth {
+    param([string]$ModelName)
+    $entry = $script:CC_HEALTH_CACHE[$ModelName]
+    if ($entry -and ($entry.Timestamp -gt (Get-Date).AddSeconds(-$script:CC_HEALTH_CACHE_TTL))) {
+        return $entry.Healthy
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Set health cache entry for a model.
+#>
+function Set-CachedHealth {
+    param([string]$ModelName, [bool]$Healthy)
+    $script:CC_HEALTH_CACHE[$ModelName] = @{
+        Healthy = $Healthy
+        Timestamp = Get-Date
+    }
+}
+
+<#
+.SYNOPSIS
+    Clear stale entries from the health cache.
+#>
+function Clear-StaleHealthCache {
+    $cutoff = (Get-Date).AddSeconds(-$script:CC_HEALTH_CACHE_TTL)
+    $stale = @($script:CC_HEALTH_CACHE.Keys | Where-Object {
+        $script:CC_HEALTH_CACHE[$_].Timestamp -lt $cutoff
+    })
+    foreach ($k in $stale) { $script:CC_HEALTH_CACHE.Remove($k) }
+}
+
 # Fetch model list from CPA, returns array or $null on failure
 function Get-CPAModelList {
     $ep = Resolve-CPAEndpoint
@@ -108,6 +205,7 @@ function Get-CPAModelList {
 <#
 .SYNOPSIS
     Ping a single model to verify it's healthy and responding.
+    Uses in-memory cache (TTL: 60s) to avoid redundant pings.
     Returns $true if the model responds successfully, $false otherwise.
 #>
 function Test-ModelHealth {
@@ -115,6 +213,10 @@ function Test-ModelHealth {
         [string]$ModelName,
         [int]$Timeout = 10
     )
+
+    # Check cache first
+    $cached = Get-CachedHealth -ModelName $ModelName
+    if ($null -ne $cached) { return $cached }
 
     $ep = Resolve-CPAEndpoint
     $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
@@ -143,16 +245,19 @@ function Test-ModelHealth {
             -ContentType "application/json" `
             -TimeoutSec $Timeout `
             -ErrorAction Stop
+        Set-CachedHealth -ModelName $ModelName -Healthy $true
         return $true
     } catch {
+        Set-CachedHealth -ModelName $ModelName -Healthy $false
         return $false
     }
 }
 
 <#
 .SYNOPSIS
-    Test multiple models in parallel and return the first healthy one,
-    or $null if none respond.
+    Test candidates in priority order and return the first healthy one.
+    Uses health cache to avoid redundant pings across call sites.
+    Sequential with early exit — minimizes API calls (unlike old parallel-all approach).
 .PARAMETER Candidates
     Ordered array of model names, in priority order (best first).
 .PARAMETER Timeout
@@ -165,55 +270,23 @@ function Select-HealthyModel {
     )
 
     if ($Candidates.Count -eq 0) { return $null }
-    if ($Candidates.Count -eq 1) {
-        # Single candidate: test inline, no parallel overhead
-        if (Test-ModelHealth -ModelName $Candidates[0] -Timeout $Timeout) {
-            return $Candidates[0]
-        }
-        return $null
-    }
 
-    # Sort candidates so shorter names get tested first as a rough speed heuristic
-    $sorted = $Candidates | Sort-Object Length
-    $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
-    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
-        $json = Get-CCSettings
-        if ($json -and $json.env.ANTHROPIC_BASE_URL) { $json.env.ANTHROPIC_BASE_URL } else { $null }
-    }
-    $ep = Resolve-CPAEndpoint
-
-    $sorted | ForEach-Object -Parallel {
-        $modelName = $_
-        $baseUrl = $using:baseUrl
-        $apiKey = $using:ep.ApiKey
-        $timeout = $using:Timeout
-        $results = $using:results
-
-        $headers = @{
-            "Content-Type" = "application/json"
-            "Authorization" = "Bearer $apiKey"
-            "anthropic-version" = "2023-06-01"
-        }
-        $body = @{
-            model    = $modelName
-            messages = @(@{ role = "user"; content = "ping" })
-            max_tokens = 5
-        } | ConvertTo-Json
-
-        try {
-            $null = Invoke-RestMethod -Uri "$baseUrl/v1/messages" `
-                -Method Post -Headers $headers -Body $body `
-                -ContentType "application/json" -TimeoutSec $timeout -ErrorAction Stop
-            $results.Add(@{ model = $modelName; status = "healthy" })
-        } catch {
-            $results.Add(@{ model = $modelName; status = "failed" })
-        }
-    } -ThrottleLimit 5
-
-    # Return the first healthy model in original priority order
-    $healthy = @($results | Where-Object { $_.status -eq "healthy" } | ForEach-Object { $_.model })
+    # Sequential testing with early exit — test in priority order, stop at first healthy.
+    # This is optimal because:
+    #   1. Each task group only needs one healthy model
+    #   2. Health cache prevents re-pinging models across task groups
+    #   3. Priority ordering means best models tested first
     foreach ($m in $Candidates) {
-        if ($m -in $healthy) { return $m }
+        $cached = Get-CachedHealth -ModelName $m
+        if ($null -ne $cached) {
+            if ($cached) { return $m }
+            continue  # known unhealthy, skip
+        }
+        Write-Host "." -ForegroundColor Gray -NoNewline
+        if (Test-ModelHealth -ModelName $m -Timeout $Timeout) {
+            return $m
+        }
+        # failed — cache is set inside Test-ModelHealth, continue to next
     }
     return $null
 }
@@ -237,84 +310,74 @@ function Invoke-CCAutoAssign {
         }
     }
 
-    # Categorize models by vendor prefix
-    $claude = @($cpaModels | Where-Object { $_ -imatch "^claude|^sonnet|^haiku" } | Sort-Object)
-    $gpt    = @($cpaModels | Where-Object { $_ -imatch "^(gpt|o\d)" } | Sort-Object)
-    $ds     = @($cpaModels | Where-Object { $_ -imatch "^deepseek" } | Sort-Object)
-    $qwen   = @($cpaModels | Where-Object { $_ -imatch "^qwen" } | Sort-Object)
-    $grok   = @($cpaModels | Where-Object { $_ -imatch "^grok" } | Sort-Object)
-    $image  = @($cpaModels | Where-Object { $_ -imatch "image" } | Sort-Object)
-    $all    = $cpaModels | Sort-Object
+    # Clear stale cache entries before a fresh auto-assign
+    Clear-StaleHealthCache
 
-    # Helper: prefer models without "free" in name
+    $groups = Group-ModelsByCategory -ModelList $cpaModels
+    $all = $cpaModels | Sort-Object
     $preferPaid = { param($list) @($list | Where-Object { $_ -inotmatch "free" }) }
-    $claudePaid = & $preferPaid $claude
-    $gptPaid    = & $preferPaid $gpt
-    $dsPaid     = & $preferPaid $ds
-    $qwenPaid   = & $preferPaid $qwen
+
+    $claude = & $preferPaid $groups["Claude"]
+    $gpt    = & $preferPaid $groups["GPT"]
+    $ds     = & $preferPaid $groups["DeepSeek"]
+    $qwen   = & $preferPaid $groups["Qwen"]
+    $grok   = $groups["Grok"]
+    $image  = @($all | Where-Object { $_ -imatch "image" })
 
     $assign = @{}
 
-    Write-Host "  Testing model health" -ForegroundColor Gray -NoNewline
+    Write-Host "  Probing models" -ForegroundColor Gray -NoNewline
 
     # --- code: Claude (non-haiku) → Claude (any) → GPT → Qwen → anything ---
     $codeCandidates = @()
-    $codeCandidates += @($claudePaid | Where-Object { $_ -inotmatch "haiku" })
-    $codeCandidates += @($claudePaid)
-    $codeCandidates += @($gptPaid)
-    $codeCandidates += @($qwenPaid)
+    $codeCandidates += @($claude | Where-Object { $_ -inotmatch "haiku" })
+    $codeCandidates += @($claude)
+    $codeCandidates += @($gpt)
+    $codeCandidates += @($qwen)
     $codeCandidates += @($all)
     $selected = Select-HealthyModel -Candidates $codeCandidates
     if ($selected) { $assign.code = $selected }
 
-    Write-Host "." -ForegroundColor Gray -NoNewline
-
     # --- reason: GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything ---
     $reasonCandidates = @()
-    $reasonCandidates += @($gptPaid | Where-Object { $_ -imatch "sol|reason|preview|thinking" })
-    $reasonCandidates += @($gptPaid)
-    $reasonCandidates += @($qwenPaid | Where-Object { $_ -imatch "plus|max|preview" })
-    $reasonCandidates += @($qwenPaid)
-    $reasonCandidates += @($claudePaid | Where-Object { $_ -imatch "thinking" })
-    $reasonCandidates += @($claudePaid)
+    $reasonCandidates += @($gpt | Where-Object { $_ -imatch "sol|reason|preview|thinking" })
+    $reasonCandidates += @($gpt)
+    $reasonCandidates += @($qwen | Where-Object { $_ -imatch "plus|max|preview" })
+    $reasonCandidates += @($qwen)
+    $reasonCandidates += @($claude | Where-Object { $_ -imatch "thinking" })
+    $reasonCandidates += @($claude)
     $reasonCandidates += @($all)
     $selected = Select-HealthyModel -Candidates $reasonCandidates
     if ($selected) { $assign.reason = $selected }
 
-    Write-Host "." -ForegroundColor Gray -NoNewline
-
     # --- quick: DeepSeek flash → DeepSeek → GPT mini/turbo → Qwen flash → Grok → anything ---
     $quickCandidates = @()
-    $quickCandidates += @($dsPaid | Where-Object { $_ -imatch "flash" })
-    $quickCandidates += @($dsPaid)
-    $quickCandidates += @($gptPaid | Where-Object { $_ -imatch "mini|flash|turbo|light|lite" })
-    $quickCandidates += @($gptPaid)
-    $quickCandidates += @($qwenPaid | Where-Object { $_ -imatch "flash|turbo|light" })
-    $quickCandidates += @($qwenPaid)
+    $quickCandidates += @($ds | Where-Object { $_ -imatch "flash" })
+    $quickCandidates += @($ds)
+    $quickCandidates += @($gpt | Where-Object { $_ -imatch "mini|flash|turbo|light|lite" })
+    $quickCandidates += @($gpt)
+    $quickCandidates += @($qwen | Where-Object { $_ -imatch "flash|turbo|light" })
+    $quickCandidates += @($qwen)
     $quickCandidates += @($grok)
     $quickCandidates += @($all)
     $selected = Select-HealthyModel -Candidates $quickCandidates
     if ($selected) { $assign.quick = $selected }
 
-    Write-Host "." -ForegroundColor Gray -NoNewline
-
     # --- image: image-specific → GPT → Grok image → anything ---
     $imageCandidates = @()
     $imageCandidates += @($image)
-    $imageCandidates += @($gptPaid)
+    $imageCandidates += @($gpt)
     $imageCandidates += @($grok | Where-Object { $_ -imatch "image" })
     $imageCandidates += @($all)
     $selected = Select-HealthyModel -Candidates $imageCandidates
     if ($selected) { $assign.image = $selected }
 
-    Write-Host "." -ForegroundColor Gray -NoNewline
-
     # --- default: GPT → DeepSeek → Claude → Qwen → anything ---
     $defaultCandidates = @()
-    $defaultCandidates += @($gptPaid)
-    $defaultCandidates += @($dsPaid)
-    $defaultCandidates += @($claudePaid)
-    $defaultCandidates += @($qwenPaid)
+    $defaultCandidates += @($gpt)
+    $defaultCandidates += @($ds)
+    $defaultCandidates += @($claude)
+    $defaultCandidates += @($qwen)
     $defaultCandidates += @($all)
     $selected = Select-HealthyModel -Candidates $defaultCandidates
     if ($selected) { $assign.default = $selected }
@@ -420,6 +483,8 @@ function global:cc-run {
     <#
     .SYNOPSIS
         Launch Claude Code with a task-appropriate model from CPA auto-assignment or manual config.
+        Includes health-aware fallback: if the primary model fails to respond, falls through
+        to fallback candidates before giving up.
     .PARAMETER Task
         Task type: code, quick, reason, image, default, or a model name directly.
     #>
@@ -438,17 +503,20 @@ function global:cc-run {
             default = $json.taskModels.default
         }
     } else {
-        # Fallback: hardcoded defaults if no CPA auto-assignment done yet
-        $all = $json.availableModels
-        $gpt = @($all | Where-Object { $_ -imatch "^(gpt|o\d)" })
-        $ds  = @($all | Where-Object { $_ -imatch "^deepseek" })
-        $claude = @($all | Where-Object { $_ -imatch "^claude|^sonnet|^haiku" })
-        @{
-            code    = if ($claude.Count -gt 0) { $claude[0] } elseif ($gpt.Count -gt 0) { $gpt[0] } else { $all[0] }
-            quick   = if ($ds.Count -gt 0) { $ds[0] } elseif ($gpt.Count -gt 0) { $gpt[0] } else { $all[0] }
-            reason  = if ($gpt.Count -gt 0) { $gpt[-1] } elseif ($claude.Count -gt 0) { $claude[-1] } else { $all[-1] }
-            image   = if ($gpt.Count -gt 0) { $gpt[0] } else { $all[0] }
-            default = if ($gpt.Count -gt 0) { $gpt[0] } elseif ($ds.Count -gt 0) { $ds[0] } else { $all[0] }
+        # Fallback: build candidate lists and health-check before selecting
+        Write-Host "[cc-run] No taskModels configured. Probing for best model..." -ForegroundColor Yellow
+        $assign = Invoke-CCAutoAssign
+        if ($assign) {
+            $modelMap = @{
+                code    = $assign.code
+                quick   = $assign.quick
+                reason  = $assign.reason
+                image   = $assign.image
+                default = $assign.default
+            }
+        } else {
+            Write-Host "[cc-run] Could not auto-assign models." -ForegroundColor Red
+            return
         }
     }
 
@@ -458,6 +526,29 @@ function global:cc-run {
     } else {
         $model = $Task
         Write-Host "[cc-run] Direct model: $model" -ForegroundColor Cyan
+    }
+
+    # Health check: verify the selected model is responsive
+    # If not, attempt fallback within the same task group
+    if (-not (Test-ModelHealth -ModelName $model -Timeout 10)) {
+        Write-Host "[cc-run] Model '$model' is not responding. Searching for fallback..." -ForegroundColor Yellow
+        $all = $json.availableModels
+        if ($all) {
+            $fallbackCandidates = @($all | Where-Object { $_ -ne $model })
+            $healthy = $null
+            foreach ($m in $fallbackCandidates) {
+                if (Test-ModelHealth -ModelName $m -Timeout 10) {
+                    $healthy = $m
+                    break
+                }
+            }
+            if ($healthy) {
+                Write-Host "[cc-run] Fallback to healthy model: $healthy" -ForegroundColor Green
+                $model = $healthy
+            } else {
+                Write-Host "[cc-run] No healthy fallback model found. Attempting launch anyway..." -ForegroundColor Yellow
+            }
+        }
     }
 
     cc $model
@@ -619,7 +710,7 @@ function global:cc-sync {
         Write-Host "=== CPA Models ($($cpaModels.Count)) ===" -ForegroundColor Cyan
         $cpaModels | Sort-Object | ForEach-Object { Write-Host "  $_" -ForegroundColor Gray }
         Write-Host ""
-        Write-Host "--- $(cpaModels.Count) models ---" -ForegroundColor Gray
+        Write-Host "--- $($cpaModels.Count) models ---" -ForegroundColor Gray
         return
     }
 
@@ -645,20 +736,8 @@ function global:cc-sync {
     Write-Host ""
     Write-Host "=== CPA Model List ===" -ForegroundColor Cyan
 
-    # Detect prefix categories
-    $categories = $cpaModels | Sort-Object | Group-Object -Property {
-        if ($_ -imatch "^(gpt|o\d)") { "OpenAI" }
-        elseif ($_ -imatch "^claude|^sonnet|^haiku") { "Anthropic" }
-        elseif ($_ -imatch "^deepseek") { "DeepSeek" }
-        elseif ($_ -imatch "^qwen") { "Qwen/Alibaba" }
-        elseif ($_ -imatch "^grok") { "Grok/xAI" }
-        elseif ($_ -imatch "^llama") { "Meta/Llama" }
-        elseif ($_ -imatch "^mistral|^mixtral") { "Mistral" }
-        elseif ($_ -imatch "^gemin") { "Google/Gemini" }
-        elseif ($_ -imatch "^kimi|^moonshot") { "Moonshot/Kimi" }
-        elseif ($_ -imatch "step") { "Stepfun" }
-        else { "Other" }
-    }
+    # Detect prefix categories using centralized helper
+    $categories = $cpaModels | Sort-Object | Group-Object -Property { Get-ModelCategory -ModelName $_ }
 
     $categories | Sort-Object Name | ForEach-Object {
         Write-Host "  [$($_.Name)]" -ForegroundColor Magenta
@@ -1229,34 +1308,18 @@ function global:cc-status {
     }
     Write-Host ""
 
-    $groups = @{
-        "GPT"      = @($json.availableModels | Where-Object { $_ -like "gpt-*" })
-        "Claude"   = @($json.availableModels | Where-Object { $_ -like "*claude*" })
-        "DeepSeek" = @($json.availableModels | Where-Object { $_ -like "*deepseek*" })
-        "Qwen"     = @($json.availableModels | Where-Object { $_ -like "*qwen*" })
-        "Grok"     = @($json.availableModels | Where-Object { $_ -like "grok*" })
-        "Moonshot" = @($json.availableModels | Where-Object { $_ -like "moonshotai*" })
-        "StepFun"  = @($json.availableModels | Where-Object { $_ -like "stepfun*" })
-    }
+    $groups = Group-ModelsByCategory -ModelList $json.availableModels
+    $order = Get-CategorySortOrder
 
-    foreach ($g in $groups.GetEnumerator() | Sort-Object { $_.Value.Count } -Descending) {
-        if ($g.Value.Count -gt 0) {
-            Write-Host "$($g.Key) ($($g.Value.Count))" -ForegroundColor Yellow
-            foreach ($m in ($g.Value | Sort-Object)) {
+    foreach ($cat in ($groups.Keys | Sort-Object @{Expression={ $order[$_] } })) {
+        $models = $groups[$cat]
+        if ($models.Count -gt 0) {
+            Write-Host "$cat ($($models.Count))" -ForegroundColor Yellow
+            foreach ($m in $models) {
                 $marker = if ($m -eq $current) { " <-- current" } else { "" }
                 Write-Host "  $m$marker" -ForegroundColor White
             }
             Write-Host ""
-        }
-    }
-
-    $grouped = $groups.Values | ForEach-Object { $_ } | Select-Object -Unique
-    $others = @($json.availableModels | Where-Object { $_ -notin $grouped })
-    if ($others.Count -gt 0) {
-        Write-Host "Other ($($others.Count))" -ForegroundColor Yellow
-        foreach ($m in ($others | Sort-Object)) {
-            $marker = if ($m -eq $current) { " <-- current" } else { "" }
-            Write-Host "  $m$marker" -ForegroundColor White
         }
     }
 }
@@ -1311,29 +1374,9 @@ function Show-CCMenu {
     # Dynamic model list from availableModels
     $json = Get-CCSettings
     if ($json -and $json.availableModels -and $json.availableModels.Count -gt 0) {
-        $cats = @{}
-        $json.availableModels | ForEach-Object {
-            $cat = if ($_ -imatch "^(gpt|o\d)") { "GPT" }
-            elseif ($_ -imatch "^claude|^sonnet|^haiku") { "Claude" }
-            elseif ($_ -imatch "^deepseek") { "DeepSeek" }
-            elseif ($_ -imatch "^qwen") { "Qwen" }
-            elseif ($_ -imatch "^grok") { "Grok" }
-            elseif ($_ -imatch "^kimi|^moonshot") { "Moonshot" }
-            elseif ($_ -imatch "^llama") { "Llama" }
-            elseif ($_ -imatch "^mistral|^mixtral") { "Mistral" }
-            elseif ($_ -imatch "^gemin") { "Gemini" }
-            elseif ($_ -imatch "step") { "Stepfun" }
-            else { "Other" }
-            if (-not $cats[$cat]) { $cats[$cat] = @() }
-            $cats[$cat] += $_
-        }
-        $cats.Keys | Sort-Object @{Expression={
-            switch ($_) {
-                "GPT" { 1 }; "Claude" { 2 }; "DeepSeek" { 3 }; "Grok" { 4 }
-                "Qwen" { 5 }; "Gemini" { 6 }; "Moonshot" { 7 }; "Llama" { 8 }
-                "Mistral" { 9 }; "Stepfun" { 10 }; default { 99 }
-            }
-        }} | ForEach-Object {
+        $cats = Group-ModelsByCategory -ModelList $json.availableModels
+        $order = Get-CategorySortOrder
+        $cats.Keys | Sort-Object @{Expression={ $order[$_] } } | ForEach-Object {
             $models = $cats[$_] -join "  "
             Write-Host "$($_):`t$models" -ForegroundColor Gray
         }

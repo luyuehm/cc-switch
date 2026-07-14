@@ -6,6 +6,8 @@
 - **Model Switching** — Switch AI models + OAuth bypass (no login)
 - **Auto Discovery** — `cc` auto-fetches CPA models and assigns best model per task
 - **Task Scheduling** — `cc-run` uses different models for code, quick, reason, image tasks
+- **Health-Aware Fallback** — Models are health-checked before assignment; `cc-run` falls back to a healthy model if the primary is unresponsive
+- **Smart Health Cache** — 60s TTL cache avoids redundant API pings; sequential early-exit probing minimizes requests
 - **CPA Sync** — Fetch, diff, add/remove models from your CPA proxy
 - **Skill Menu Management** — Audit, hide/show, preset profiles
 - **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
@@ -339,15 +341,15 @@ The `skills/cc-menu/SKILL.md` defines Claude Code as a trigger skill. After `ins
 
 ### 1. 🎯 CPA Auto Discovery + Task Scheduling (New)
 
-Run `cc` with no arguments to **auto-discover all CPA models** and **intelligently assign** the best model to each task level:
+Run `cc` with no arguments to **auto-discover all CPA models** and **intelligently assign** the best model to each task level. Each model is health-checked before assignment — unhealthy models are skipped and cached for 60s:
 
 | Task | Assignment Logic | Typical Model |
 |------|-----------------|---------------|
-| `code` | Claude → GPT → Qwen | claude-sonnet-4.6 |
-| `reason` | GPT-sol → GPT → Qwen-Plus → Claude | gpt-5.6-sol |
-| `quick` | DeepSeek → mini/flash → GPT-turbo | deepseek-v4-flash |
-| `image` | image-specific → GPT | gpt-image-2 |
-| `default` | GPT → DeepSeek → Claude → Qwen | gpt-5.5 |
+| `code` | Claude (non-haiku) → Claude → GPT → Qwen → anything | claude-sonnet-4.6 |
+| `reason` | GPT-sol → GPT → Qwen-Plus/Max → Claude thinking → Claude → anything | gpt-5.6-sol |
+| `quick` | DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything | deepseek-v4-flash |
+| `image` | image-specific → GPT → Grok image → anything | gpt-image-2 |
+| `default` | GPT → DeepSeek → Claude → Qwen → anything | gpt-5.5 |
 
 The assignment is saved to `settings.json → taskModels` and used by `cc-run`:
 
@@ -358,6 +360,8 @@ cc-run quick       # simple/fast
 cc-run reason      # deep analysis
 cc-run image       # image generation
 ```
+
+**Health-aware fallback:** Before launching, `cc-run` verifies the assigned model is responsive. If not, it automatically searches for a healthy fallback model. Failed models are cached (60s TTL) to avoid repeated pings across task groups.
 
 View and override with `cc-config`:
 
@@ -643,8 +647,8 @@ Path: `~/.claude/settings.json`
 
 ```
 cc-switch/
-├── cc-switch.sh               # Core functions: model switch + menu + theme (bash/zsh)
-├── cc-switch.ps1              # Core: model switch + auto-discovery + menu + theme (PowerShell)
+├── cc-switch.sh               # Core functions: model switch + menu + theme (bash/zsh, 848 lines)
+├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~1390 lines)
 ├── install.sh                 # macOS installer (bash)
 ├── install.ps1                # Windows/pwsh 5-step installer
 ├── profile-backup.ps1         # Optional pwsh utilities
