@@ -294,13 +294,15 @@ function Select-HealthyModel {
 <#
 .SYNOPSIS
     Auto-discover CPA models and assign the best model to each task type.
-    Each candidate is health-checked before assignment.
+    Guarantees all assigned models are healthy:
+      1. Sequential per-group probing (fast, uses cache across groups)
+      2. Final verification: re-ping each assigned model
+      3. On-demand fallback: if any model is stale/unhealthy, probe next candidate
     Results saved to settings.json → taskModels.
 #>
 function Invoke-CCAutoAssign {
     $cpaModels = Get-CPAModelList
     if (-not $cpaModels) {
-        # Fall back to local availableModels if CPA unavailable
         $json = Get-CCSettings
         if ($json -and $json.availableModels -and $json.availableModels.Count -gt 0) {
             $cpaModels = $json.availableModels
@@ -310,7 +312,6 @@ function Invoke-CCAutoAssign {
         }
     }
 
-    # Clear stale cache entries before a fresh auto-assign
     Clear-StaleHealthCache
 
     $groups = Group-ModelsByCategory -ModelList $cpaModels
@@ -325,20 +326,23 @@ function Invoke-CCAutoAssign {
     $image  = @($all | Where-Object { $_ -imatch "image" })
 
     $assign = @{}
+    Write-Host "  Probing model health" -ForegroundColor Gray -NoNewline
 
-    Write-Host "  Probing models" -ForegroundColor Gray -NoNewline
+    # ── Phase 1: Sequential per-group probing (cache shared across groups) ──
+    # Note: $all fallback is limited to first 20 models to avoid probing 150+ models
+    $allFallback = $all | Select-Object -First 20
 
-    # --- code: Claude (non-haiku) → Claude (any) → GPT → Qwen → anything ---
+    # code: Claude (non-haiku) → Claude → GPT → Qwen → anything (limit 20)
     $codeCandidates = @()
     $codeCandidates += @($claude | Where-Object { $_ -inotmatch "haiku" })
     $codeCandidates += @($claude)
     $codeCandidates += @($gpt)
     $codeCandidates += @($qwen)
-    $codeCandidates += @($all)
+    $codeCandidates += @($allFallback)
     $selected = Select-HealthyModel -Candidates $codeCandidates
     if ($selected) { $assign.code = $selected }
 
-    # --- reason: GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything ---
+    # reason: GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything (limit 20)
     $reasonCandidates = @()
     $reasonCandidates += @($gpt | Where-Object { $_ -imatch "sol|reason|preview|thinking" })
     $reasonCandidates += @($gpt)
@@ -346,11 +350,11 @@ function Invoke-CCAutoAssign {
     $reasonCandidates += @($qwen)
     $reasonCandidates += @($claude | Where-Object { $_ -imatch "thinking" })
     $reasonCandidates += @($claude)
-    $reasonCandidates += @($all)
+    $reasonCandidates += @($allFallback)
     $selected = Select-HealthyModel -Candidates $reasonCandidates
     if ($selected) { $assign.reason = $selected }
 
-    # --- quick: DeepSeek flash → DeepSeek → GPT mini/turbo → Qwen flash → Grok → anything ---
+    # quick: DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything (limit 20)
     $quickCandidates = @()
     $quickCandidates += @($ds | Where-Object { $_ -imatch "flash" })
     $quickCandidates += @($ds)
@@ -359,36 +363,73 @@ function Invoke-CCAutoAssign {
     $quickCandidates += @($qwen | Where-Object { $_ -imatch "flash|turbo|light" })
     $quickCandidates += @($qwen)
     $quickCandidates += @($grok)
-    $quickCandidates += @($all)
+    $quickCandidates += @($allFallback)
     $selected = Select-HealthyModel -Candidates $quickCandidates
     if ($selected) { $assign.quick = $selected }
 
-    # --- image: image-specific → GPT → Grok image → anything ---
+    # image: image-specific → GPT → Grok image → anything (limit 20)
     $imageCandidates = @()
     $imageCandidates += @($image)
     $imageCandidates += @($gpt)
     $imageCandidates += @($grok | Where-Object { $_ -imatch "image" })
-    $imageCandidates += @($all)
+    $imageCandidates += @($allFallback)
     $selected = Select-HealthyModel -Candidates $imageCandidates
     if ($selected) { $assign.image = $selected }
 
-    # --- default: GPT → DeepSeek → Claude → Qwen → anything ---
+    # default: GPT → DeepSeek → Claude → Qwen → anything (limit 20)
     $defaultCandidates = @()
     $defaultCandidates += @($gpt)
     $defaultCandidates += @($ds)
     $defaultCandidates += @($claude)
     $defaultCandidates += @($qwen)
-    $defaultCandidates += @($all)
+    $defaultCandidates += @($allFallback)
     $selected = Select-HealthyModel -Candidates $defaultCandidates
     if ($selected) { $assign.default = $selected }
 
+    # ── Phase 2: Final verification — re-confirm each assigned model is healthy ──
+    # If a model was probed early in phase 1 and is now stale/rate-limited, fallback
+    foreach ($task in @($assign.Keys)) {
+        $model = $assign[$task]
+        # Skip if cache entry is fresh (< 20s old)
+        $entry = $script:CC_HEALTH_CACHE[$model]
+        $fresh = $entry -and ((Get-Date) - $entry.Timestamp).TotalSeconds -lt 20 -and $entry.Healthy
+        if ($fresh) { continue }
+
+        Write-Host "!" -ForegroundColor Gray -NoNewline
+        if (-not (Test-ModelHealth -ModelName $model -Timeout 10)) {
+            Write-Host "`n  [FALLBACK]  $model unhealthy for '$task', searching..." -ForegroundColor Yellow
+            # Build fallback candidates for this task
+            $fallbackCandidates = @()
+            switch ($task) {
+                "code"    { $fallbackCandidates = $codeCandidates }
+                "reason"  { $fallbackCandidates = $reasonCandidates }
+                "quick"   { $fallbackCandidates = $quickCandidates }
+                "image"   { $fallbackCandidates = $imageCandidates }
+                "default" { $fallbackCandidates = $defaultCandidates }
+            }
+            $newSelected = $null
+            foreach ($m in $fallbackCandidates) {
+                if ($m -eq $model) { continue }
+                $cached = Get-CachedHealth -ModelName $m
+                if ($null -ne $cached -and $cached) { $newSelected = $m; break }
+                Write-Host "." -ForegroundColor Gray -NoNewline
+                if (Test-ModelHealth -ModelName $m -Timeout 10) { $newSelected = $m; break }
+            }
+            if ($newSelected) {
+                Write-Host "`n    → $newSelected" -ForegroundColor Green
+                $assign[$task] = $newSelected
+            } else {
+                Write-Host "`n    → No healthy fallback" -ForegroundColor Red
+                $assign.Remove($task)
+            }
+        }
+    }
+
     Write-Host " [done]" -ForegroundColor Gray
 
-    # Also sync availableModels if CPA returned models
     $json = Get-CCSettings
     if ($json -and $cpaModels) {
         $json.availableModels = $cpaModels | Sort-Object -Unique
-        # PSCustomObject from ConvertFrom-Json: must use Add-Member for new properties
         $json | Add-Member -NotePropertyName "taskModels" -NotePropertyValue ([PSCustomObject]$assign) -Force
         Save-CCSettings $json
     }
@@ -483,8 +524,8 @@ function global:cc-run {
     <#
     .SYNOPSIS
         Launch Claude Code with a task-appropriate model from CPA auto-assignment or manual config.
-        Includes health-aware fallback: if the primary model fails to respond, falls through
-        to fallback candidates before giving up.
+        Health-aware: uses the cached health map from auto-assign, with smart category-prioritized
+        fallback if the assigned model is no longer responsive.
     .PARAMETER Task
         Task type: code, quick, reason, image, default, or a model name directly.
     #>
@@ -528,26 +569,34 @@ function global:cc-run {
         Write-Host "[cc-run] Direct model: $model" -ForegroundColor Cyan
     }
 
-    # Health check: verify the selected model is responsive
-    # If not, attempt fallback within the same task group
-    if (-not (Test-ModelHealth -ModelName $model -Timeout 10)) {
-        Write-Host "[cc-run] Model '$model' is not responding. Searching for fallback..." -ForegroundColor Yellow
-        $all = $json.availableModels
-        if ($all) {
-            $fallbackCandidates = @($all | Where-Object { $_ -ne $model })
-            $healthy = $null
-            foreach ($m in $fallbackCandidates) {
-                if (Test-ModelHealth -ModelName $m -Timeout 10) {
-                    $healthy = $m
-                    break
-                }
+    # Health check: use cache if fresh (< 60s), otherwise re-ping
+    # If unhealthy, search for a fallback within the same vendor category first
+    $cached = Get-CachedHealth -ModelName $model
+    $isHealthy = if ($null -ne $cached) { $cached } else { Test-ModelHealth -ModelName $model -Timeout 10 }
+
+    if (-not $isHealthy) {
+        Write-Host "[cc-run] Model '$model' is not responding. Searching for healthy fallback..." -ForegroundColor Yellow
+        $fallback = $null
+        # Try same-category models first (same vendor, likely same capability)
+        $cat = Get-ModelCategory -ModelName $model
+        $sameCatModels = @($json.availableModels | Where-Object {
+            (Get-ModelCategory -ModelName $_) -eq $cat -and $_ -ne $model
+        })
+        foreach ($m in $sameCatModels) {
+            if (Test-ModelHealth -ModelName $m -Timeout 10) { $fallback = $m; break }
+        }
+        # If no same-category model works, try any available model
+        if (-not $fallback) {
+            foreach ($m in $json.availableModels) {
+                if ($m -eq $model) { continue }
+                if (Test-ModelHealth -ModelName $m -Timeout 5) { $fallback = $m; break }
             }
-            if ($healthy) {
-                Write-Host "[cc-run] Fallback to healthy model: $healthy" -ForegroundColor Green
-                $model = $healthy
-            } else {
-                Write-Host "[cc-run] No healthy fallback model found. Attempting launch anyway..." -ForegroundColor Yellow
-            }
+        }
+        if ($fallback) {
+            Write-Host "[cc-run] Fallback to: $fallback" -ForegroundColor Green
+            $model = $fallback
+        } else {
+            Write-Host "[cc-run] No healthy fallback found. Attempting launch anyway..." -ForegroundColor Yellow
         }
     }
 
