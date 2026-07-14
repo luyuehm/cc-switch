@@ -21,19 +21,40 @@ if (-not (Test-Path "$env:USERPROFILE\.claude")) {
 Copy-Item "$scriptDir\cc-switch.ps1" "$env:USERPROFILE\.claude\cc-switch.ps1" -Force
 Write-Host "  [OK]  Core script installed" -ForegroundColor Green
 
-# [2/5] Copy cc-menu Python scripts (optional advanced features)
+# [2/5] Install Claude Code slash commands + cc-menu skill package
 Write-Host ""
-Write-Host "[2/5] Installing cc-menu skill management (optional advanced features)..." -ForegroundColor Yellow
-$skillsDir = "$env:USERPROFILE\.claude\skills\cc-menu"
-if (Test-Path $skillsDir) {
-    Write-Host "  [INFO]   cc-menu skills already exist, skipping..." -ForegroundColor Gray
+Write-Host "[2/5] Installing Claude Code commands and cc-menu skills..." -ForegroundColor Yellow
+
+# Slash command: /switch
+$commandsDir = "$env:USERPROFILE\.claude\commands"
+if (-not (Test-Path $commandsDir)) {
+    New-Item -ItemType Directory -Force -Path $commandsDir | Out-Null
+}
+if (Test-Path "$scriptDir\switch.md") {
+    Copy-Item "$scriptDir\switch.md" "$commandsDir\switch.md" -Force
+    Write-Host "  [OK]  /switch command installed to $commandsDir\switch.md" -ForegroundColor Green
 } else {
-    if (Test-Path "$scriptDir\skills\cc-menu") {
-        Copy-Item "$scriptDir\skills\cc-menu" $skillsDir -Recurse -Force
-        Write-Host "  [OK]  cc-menu skills installed to $skillsDir" -ForegroundColor Green
-    } else {
-        Write-Host "  (!)   cc-menu skills not found (optional, skipped)" -ForegroundColor Yellow
+    Write-Host "  (!)   switch.md not found (slash command skipped)" -ForegroundColor Yellow
+}
+
+# Skill package: /cc-menu and cleaner proxy scripts
+$skillsRoot = "$env:USERPROFILE\.claude\skills"
+$skillsDir = "$skillsRoot\cc-menu"
+if (-not (Test-Path $skillsRoot)) {
+    New-Item -ItemType Directory -Force -Path $skillsRoot | Out-Null
+}
+if (Test-Path "$scriptDir\skills\cc-menu") {
+    if (-not (Test-Path $skillsDir)) {
+        New-Item -ItemType Directory -Force -Path $skillsDir | Out-Null
     }
+    Copy-Item "$scriptDir\skills\cc-menu\*" $skillsDir -Recurse -Force
+    # Clean up nested directory created by older installer versions, if present
+    if (Test-Path "$skillsDir\cc-menu") {
+        Remove-Item "$skillsDir\cc-menu" -Recurse -Force
+    }
+    Write-Host "  [OK]  cc-menu skills installed/updated to $skillsDir" -ForegroundColor Green
+} else {
+    Write-Host "  (!)   cc-menu skills not found (optional, skipped)" -ForegroundColor Yellow
 }
 
 # [3/5] Set up .env for secrets
@@ -65,7 +86,7 @@ if (-not (Test-Path $profileDir)) {
 }
 
 $ccBlock = @'
-# === cc-switch — Claude Code Model + Menu Manager ===
+# >>> cc-switch — Claude Code Model + Menu Manager
 # https://github.com/luyuehm/cc-switch
 
 # Oh My Posh (prompt theme)
@@ -154,10 +175,11 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  1. Edit ~/.claude/cc-switch.env with your API key and CPA URL" -ForegroundColor White
 Write-Host "  2. Reload profile: . `$PROFILE" -ForegroundColor White
-Write-Host "  3. Try: cc gpt-5.5    (switch model + launch)" -ForegroundColor White
-Write-Host "          cc            (show menu)" -ForegroundColor White
-Write-Host "          cc-audit      (audit skill visibility)" -ForegroundColor White
-Write-Host "          cc-profile minimal   (hide docs/examples)" -ForegroundColor White
+Write-Host "  3. Run: cc             (auto-discover CPA models + assign task models)" -ForegroundColor White
+Write-Host "          cc-run code    (launch with coding model)" -ForegroundColor White
+Write-Host "          cc-run reason  (launch with reasoning model)" -ForegroundColor White
+Write-Host "          cc-config      (view/override task assignments)" -ForegroundColor White
+Write-Host "          /switch --auto (inside Claude Code chat)" -ForegroundColor White
 Write-Host ""
 
 if (-not $SkipProfile) {

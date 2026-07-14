@@ -60,10 +60,176 @@ function Save-CCSettings($json) {
     cc-fast      — shortcut: deepseek-v4-flash
     cc-default   — shortcut: gpt-5.5
 #>
+# PSScriptAnalyzer ignore: PSUseApprovedVerbs
+# CPA URL / API key resolution helper (shared by cc-sync, Get-CPAModelList, Invoke-CCAutoAssign)
+function Resolve-CPAEndpoint {
+    $cpaUrl = if ($env:CPA_MODELS_URL) {
+        $env:CPA_MODELS_URL
+    } else {
+        $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
+            $json = Get-CCSettings
+            if ($json) { $json.env.ANTHROPIC_BASE_URL } else { "" }
+        }
+        if ($baseUrl) { "$baseUrl/v1/models" } else { "" }
+    }
+
+    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
+        $json = Get-CCSettings
+        if ($json -and $json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else { "" }
+    }
+
+    return @{ Url = $cpaUrl; ApiKey = $apiKey }
+}
+
+# Fetch model list from CPA, returns array or $null on failure
+function Get-CPAModelList {
+    $ep = Resolve-CPAEndpoint
+    if (-not $ep.Url -or -not $ep.ApiKey) { return $null }
+
+    try {
+        $response = Invoke-RestMethod -Uri $ep.Url -Headers @{
+            "Authorization" = "Bearer $($ep.ApiKey)"
+            "Content-Type" = "application/json"
+        } -TimeoutSec 10 -ErrorAction Stop
+
+        $models = if ($response.data) {
+            $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
+        } elseif ($response -is [array]) {
+            $response | ForEach-Object { $_.id } | Where-Object { $_ }
+        } else { $null }
+
+        if ($models -and $models.Count -gt 0) { return @($models) }
+    } catch {
+        # silent fail
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Auto-discover CPA models and assign the best model to each task type.
+    Results saved to settings.json → taskModels.
+#>
+function Invoke-CCAutoAssign {
+    $cpaModels = Get-CPAModelList
+    if (-not $cpaModels) {
+        # Fall back to local availableModels if CPA unavailable
+        $json = Get-CCSettings
+        if ($json -and $json.availableModels -and $json.availableModels.Count -gt 0) {
+            $cpaModels = $json.availableModels
+        } else {
+            Write-Host "[!]  No models available from CPA or local list." -ForegroundColor Yellow
+            return $null
+        }
+    }
+
+    # Categorize models by vendor prefix
+    # Sort descending so [-1] picks the "best" (largest version number) model
+    $claude = @($cpaModels | Where-Object { $_ -imatch "^claude|^sonnet|^haiku" } | Sort-Object)
+    $gpt    = @($cpaModels | Where-Object { $_ -imatch "^(gpt|o\d)" } | Sort-Object)
+    $ds     = @($cpaModels | Where-Object { $_ -imatch "^deepseek" } | Sort-Object)
+    $qwen   = @($cpaModels | Where-Object { $_ -imatch "^qwen" } | Sort-Object)
+    $grok   = @($cpaModels | Where-Object { $_ -imatch "^grok" } | Sort-Object)
+    $image  = @($cpaModels | Where-Object { $_ -imatch "image" } | Sort-Object)
+    $all    = $cpaModels | Sort-Object
+
+    # Helper: prefer models without "free" in name
+    $preferPaid = { param($list) @($list | Where-Object { $_ -inotmatch "free" }) }
+    $claudePaid = & $preferPaid $claude
+    $gptPaid    = & $preferPaid $gpt
+    $dsPaid     = & $preferPaid $ds
+    $qwenPaid   = & $preferPaid $qwen
+
+    $assign = @{}
+
+    # code → best coding model: pick the highest-tier Claude (opus/sonnet > haiku)
+    # Sort "opus" last so it's preferred; filter haiku only as last resort
+    $codeClaude = @($claudePaid | Where-Object { $_ -inotmatch "haiku" })
+    if    ($codeClaude.Count -gt 0) { $assign.code = $codeClaude[-1] }                # claude-sonnet-4.6 or opus
+    elseif ($claudePaid.Count -gt 0) { $assign.code = $claudePaid[-1] }               # claude-haiku (only option)
+    elseif ($gptPaid.Count -gt 0)   { $assign.code = $gptPaid[-1] }                   # best GPT
+    elseif ($qwenPaid.Count -gt 0)  { $assign.code = $qwenPaid[-1] }                  # best Qwen
+    elseif ($all.Count -gt 0)       { $assign.code = $all[-1] }                        # anything
+
+    # reason → strongest reasoning: GPT reasoning variants first, then Qwen Plus/Max, then Claude thinking
+    $reasonGpt = @($gptPaid | Where-Object { $_ -imatch "sol|reason|preview|thinking" })
+    if    ($reasonGpt.Count -gt 0) { $assign.reason = $reasonGpt[-1] }
+    elseif ($gptPaid.Count -gt 0)  { $assign.reason = $gptPaid[-1] }
+    else {
+        $reasonQwen = @($qwenPaid | Where-Object { $_ -imatch "plus|max|preview" })
+        if    ($reasonQwen.Count -gt 0) { $assign.reason = $reasonQwen[-1] }
+        elseif ($qwenPaid.Count -gt 0)  { $assign.reason = $qwenPaid[-1] }
+        else {
+            $thinkClaude = @($claudePaid | Where-Object { $_ -imatch "thinking" })
+            if    ($thinkClaude.Count -gt 0) { $assign.reason = $thinkClaude[-1] }
+            elseif ($claudePaid.Count -gt 0) { $assign.reason = $claudePaid[-1] }
+            elseif ($all.Count -gt 0)        { $assign.reason = $all[-1] }
+        }
+    }
+
+    # quick → fastest/cheapest: DeepSeek flash first, then mini/turbo variants
+    $dsFlash = @($dsPaid | Where-Object { $_ -imatch "flash" })
+    if    ($dsFlash.Count -gt 0) { $assign.quick = $dsFlash[0] }
+    elseif ($dsPaid.Count -gt 0) { $assign.quick = $dsPaid[0] }
+    else {
+        $fastGpt = @($gptPaid | Where-Object { $_ -imatch "mini|flash|turbo|light|lite" })
+        if    ($fastGpt.Count -gt 0) { $assign.quick = $fastGpt[0] }
+        else {
+            $fastQwen = @($qwenPaid | Where-Object { $_ -imatch "flash|turbo|light" })
+            if    ($fastQwen.Count -gt 0) { $assign.quick = $fastQwen[0] }
+            elseif ($grok.Count -gt 0)    { $assign.quick = $grok[0] }
+            elseif ($all.Count -gt 0)     { $assign.quick = $all[0] }
+        }
+    }
+
+    # image → image-specific model, fallback to GPT
+    if    ($image.Count -gt 0)     { $assign.image = $image[0] }
+    elseif ($gptPaid.Count -gt 0)  { $assign.image = $gptPaid[0] }
+    elseif ($grok.Count -gt 0)     { $assign.image = ($grok | Where-Object { $_ -imatch "image" })[0] }
+    elseif ($all.Count -gt 0)      { $assign.image = $all[0] }
+
+    # default → balanced general-purpose: GPT first, then DeepSeek, then Claude, then Qwen
+    if    ($gptPaid.Count -gt 0)   { $assign.default = $gptPaid[0] }
+    elseif ($dsPaid.Count -gt 0)   { $assign.default = $dsPaid[0] }
+    elseif ($claudePaid.Count -gt 0) { $assign.default = $claudePaid[0] }
+    elseif ($qwenPaid.Count -gt 0) { $assign.default = $qwenPaid[0] }
+    elseif ($all.Count -gt 0)     { $assign.default = $all[0] }
+
+    # Also sync availableModels if CPA returned models
+    $json = Get-CCSettings
+    if ($json -and $cpaModels) {
+        $json.availableModels = $cpaModels | Sort-Object -Unique
+        # PSCustomObject from ConvertFrom-Json: must use Add-Member for new properties
+        $json | Add-Member -NotePropertyName "taskModels" -NotePropertyValue ([PSCustomObject]$assign) -Force
+        Save-CCSettings $json
+    }
+
+    return $assign
+}
+
 function global:cc {
     param([string]$Model = "")
 
     if ([string]::IsNullOrEmpty($Model)) {
+        # Auto-discover and assign models from CPA
+        Write-Host "Auto-discovering CPA models..." -ForegroundColor Cyan -NoNewline
+        $assign = Invoke-CCAutoAssign
+        if ($assign) {
+            Write-Host " [OK]" -ForegroundColor Green
+            Write-Host ""
+            Write-Host "=== Auto Model Assignment ===" -ForegroundColor Magenta
+            Write-Host "  code    → $($assign.code)" -ForegroundColor White
+            Write-Host "  quick   → $($assign.quick)" -ForegroundColor White
+            Write-Host "  reason  → $($assign.reason)" -ForegroundColor White
+            Write-Host "  image   → $($assign.image)" -ForegroundColor White
+            Write-Host "  default → $($assign.default)" -ForegroundColor White
+            Write-Host ""
+            Write-Host "  Use 'cc-run <task>' to launch with the assigned model." -ForegroundColor Gray
+            Write-Host "  Use 'cc-config' to view or override these assignments." -ForegroundColor Gray
+            Write-Host ""
+        } else {
+            Write-Host " [skip]" -ForegroundColor Yellow
+        }
         Show-CCMenu
         return
     }
@@ -116,37 +282,48 @@ function global:cc {
     & $claudeExe --bare
 }
 
+# PSScriptAnalyzer ignore: PSUseApprovedVerbs
 function global:cc-pro {
-    Write-Host "Switching to claude-opus-4-7..." -ForegroundColor Cyan
-    cc claude-opus-4-7
+    $json = Get-CCSettings
+    $model = if ($json -and $json.taskModels -and $json.taskModels.code) { $json.taskModels.code } else { "claude-opus-4-7" }
+    Write-Host "Switching to $model (code task)..." -ForegroundColor Cyan
+    cc $model
 }
 
 function global:cc-run {
     <#
     .SYNOPSIS
-        Launch Claude Code with a task-appropriate model. Maps task types to optimal models.
+        Launch Claude Code with a task-appropriate model from CPA auto-assignment or manual config.
     .PARAMETER Task
-        Task type or model name. Built-in types:
-          code    → claude-sonnet-4.6    (best for coding)
-          quick   → deepseek-v4-flash    (fast/cheap for simple tasks)
-          reason  → gpt-5.6-sol          (strong reasoning/analysis)
-          image   → gpt-image-2          (image generation)
-          default → deepseek-v4-flash    (general purpose)
-        Or pass any model name directly (e.g., "qwen3.6-max-preview").
-    .EXAMPLE
-        cc-run code           # start with coding-optimized model
-        cc-run quick          # start with fast model
-        cc-run reason         # start with strong reasoning model
-        cc-run gpt-5.5        # start with specific model
+        Task type: code, quick, reason, image, default, or a model name directly.
     #>
     param([string]$Task = "default")
 
-    $modelMap = @{
-        code    = "gpt-5.5"             # Best for coding (verified)
-        quick   = "deepseek-v4-flash"   # Fast/cheap (verified)
-        reason  = "qwen3.6-plus"        # Strong reasoning (verified)
-        image   = "gpt-5.5"             # Image gen not available, fallback
-        default = "deepseek-v4-flash"   # General purpose (verified)
+    $json = Get-CCSettings
+    if (-not $json) { return }
+
+    # Read task-model map from settings.json (set by cc or cc-config)
+    $modelMap = if ($json.taskModels) {
+        @{
+            code    = $json.taskModels.code
+            quick   = $json.taskModels.quick
+            reason  = $json.taskModels.reason
+            image   = $json.taskModels.image
+            default = $json.taskModels.default
+        }
+    } else {
+        # Fallback: hardcoded defaults if no CPA auto-assignment done yet
+        $all = $json.availableModels
+        $gpt = @($all | Where-Object { $_ -imatch "^(gpt|o\d)" })
+        $ds  = @($all | Where-Object { $_ -imatch "^deepseek" })
+        $claude = @($all | Where-Object { $_ -imatch "^claude|^sonnet|^haiku" })
+        @{
+            code    = if ($claude.Count -gt 0) { $claude[0] } elseif ($gpt.Count -gt 0) { $gpt[0] } else { $all[0] }
+            quick   = if ($ds.Count -gt 0) { $ds[0] } elseif ($gpt.Count -gt 0) { $gpt[0] } else { $all[0] }
+            reason  = if ($gpt.Count -gt 0) { $gpt[-1] } elseif ($claude.Count -gt 0) { $claude[-1] } else { $all[-1] }
+            image   = if ($gpt.Count -gt 0) { $gpt[0] } else { $all[0] }
+            default = if ($gpt.Count -gt 0) { $gpt[0] } elseif ($ds.Count -gt 0) { $ds[0] } else { $all[0] }
+        }
     }
 
     if ($modelMap.ContainsKey($Task)) {
@@ -160,14 +337,94 @@ function global:cc-run {
     cc $model
 }
 
+function global:cc-config {
+    <#
+    .SYNOPSIS
+        View or adjust task-to-model assignments.
+    .PARAMETER Task
+        Task type to override: code, quick, reason, image, default.
+    .PARAMETER Model
+        Model name to assign to this task.
+    .PARAMETER Reset
+        Re-run CPA auto-discovery and reassign all tasks.
+    #>
+    param(
+        [ValidateSet("code", "quick", "reason", "image", "default", "")]
+        [string]$Task = "",
+        [string]$Model = "",
+        [switch]$Reset
+    )
+
+    $json = Get-CCSettings
+    if (-not $json) { return }
+
+    if ($Reset) {
+        Write-Host "Re-running CPA auto-discovery..." -ForegroundColor Cyan
+        $assign = Invoke-CCAutoAssign
+        if (-not $assign) {
+            Write-Host "Error: could not auto-discover models." -ForegroundColor Red
+            return
+        }
+        Write-Host ""
+        Write-Host "=== Auto Model Assignment ===" -ForegroundColor Magenta
+        Write-Host "  code    → $($assign.code)" -ForegroundColor White
+        Write-Host "  quick   → $($assign.quick)" -ForegroundColor White
+        Write-Host "  reason  → $($assign.reason)" -ForegroundColor White
+        Write-Host "  image   → $($assign.image)" -ForegroundColor White
+        Write-Host "  default → $($assign.default)" -ForegroundColor White
+        Write-Host ""
+        Write-Host "Done. Use 'cc-run <task>' to launch." -ForegroundColor Green
+        return
+    }
+
+    if ($Task -and $Model) {
+        if ($json.availableModels -notcontains $Model) {
+            Write-Host "Error: '$Model' not in availableModels" -ForegroundColor Red
+            return
+        }
+        if (-not $json.taskModels) {
+            $json.taskModels = [PSCustomObject]@{}
+        }
+        $json.taskModels | Add-Member -NotePropertyName $Task -NotePropertyValue $Model -Force
+        Save-CCSettings $json
+        Write-Host "[OK]  Task '$Task' → $Model" -ForegroundColor Green
+        Write-Host "  Use 'cc-run $Task' to launch with this model." -ForegroundColor Gray
+        return
+    }
+
+    # Show current assignments
+    $map = if ($json.taskModels) {
+        $json.taskModels
+    } else {
+        Write-Host "No task model assignments configured." -ForegroundColor Yellow
+        Write-Host "Run 'cc' (no arguments) for auto-discovery, or use:" -ForegroundColor Gray
+        Write-Host "  cc-config -Reset" -ForegroundColor White
+        return
+    }
+
+    Write-Host ""
+    Write-Host "=== Task Model Assignments ===" -ForegroundColor Magenta
+    $map.PSObject.Properties | Sort-Object Name | ForEach-Object {
+        Write-Host "  $($_.Name) → $($_.Value)" -ForegroundColor White
+    }
+    Write-Host ""
+    Write-Host "Override:" -ForegroundColor Yellow
+    Write-Host "  cc-config <task> <model>      Set specific model for a task" -ForegroundColor Gray
+    Write-Host "  cc-config -Reset              Re-run CPA auto-discovery" -ForegroundColor Gray
+}
+
 function global:cc-fast {
-    Write-Host "Switching to deepseek-v4-flash..." -ForegroundColor Cyan
-    cc deepseek-v4-flash
+    $json = Get-CCSettings
+    $model = if ($json -and $json.taskModels -and $json.taskModels.quick) { $json.taskModels.quick } else { "deepseek-v4-flash" }
+    Write-Host "Switching to $model (quick task)..." -ForegroundColor Cyan
+    cc $model
 }
 
 function global:cc-default {
-    Write-Host "Restoring gpt-5.5..." -ForegroundColor Cyan
-    cc gpt-5.5
+    $json = Get-CCSettings
+    $model = if ($json -and $json.taskModels -and $json.taskModels.default) { $json.taskModels.default } else { "deepseek-v4-flash" }
+    Write-Host "Restoring $model (default task)..." -ForegroundColor Cyan
+    cc $model
 }
 
 function global:cc-sync {
@@ -180,28 +437,20 @@ function global:cc-sync {
         Auto-add new models without confirmation.
     .PARAMETER Remove
         Remove models that no longer exist on CPA from local list.
+    .PARAMETER Reassign
+        After sync, re-run CPA auto-discovery to reassign task models.
     #>
     param(
         [switch]$List,
         [switch]$Force,
-        [switch]$Remove
+        [switch]$Remove,
+        [switch]$Reassign
     )
 
     # Determine CPA models URL
-    $cpaUrl = if ($env:CPA_MODELS_URL) {
-        $env:CPA_MODELS_URL
-    } else {
-        $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
-            $json = Get-CCSettings
-            if ($json) { $json.env.ANTHROPIC_BASE_URL } else { "" }
-        }
-        if ($baseUrl) { "$baseUrl/v1/models" } else { "" }
-    }
-
-    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
-        $json = Get-CCSettings
-        if ($json -and $json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else { "" }
-    }
+    $ep = Resolve-CPAEndpoint
+    $cpaUrl = $ep.Url
+    $apiKey = $ep.ApiKey
 
     if (-not $cpaUrl -or -not $apiKey) {
         Write-Host "Error: CPA_MODELS_URL or API key not configured." -ForegroundColor Red
@@ -341,10 +590,25 @@ function global:cc-sync {
         Write-Host "  Status: fully in sync" -ForegroundColor Green
     }
 
+    # Auto-reassign task models if models changed
+    if ($Reassign -or $newModels.Count -gt 0 -or $goneModels.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Re-running task model auto-assignment..." -ForegroundColor Cyan
+        $assign = Invoke-CCAutoAssign
+        if ($assign) {
+            Write-Host "  [OK]  Updated:" -ForegroundColor Green
+            $assign.GetEnumerator() | Sort-Object Name | ForEach-Object {
+                Write-Host "    $($_.Name) → $($_.Value)" -ForegroundColor Gray
+            }
+        }
+    }
+
     Write-Host ""
-    Write-Host "Tip: cc-sync -List     — show full model list only" -ForegroundColor Gray
-    Write-Host "Tip: cc-sync -Force    — auto-add new models" -ForegroundColor Gray
-    Write-Host "Tip: cc-sync -Remove   — remove obsolete models" -ForegroundColor Gray
+    Write-Host "Tip: cc-sync -List       — show full model list only" -ForegroundColor Gray
+    Write-Host "Tip: cc-sync -Force      — auto-add new models" -ForegroundColor Gray
+    Write-Host "Tip: cc-sync -Remove     — remove obsolete models" -ForegroundColor Gray
+    Write-Host "Tip: cc-sync -Reassign   — re-assign task models after sync" -ForegroundColor Gray
+    Write-Host "Tip: cc-config           — view/override task model assignments" -ForegroundColor Gray
 }
 
 function global:cc-test {
@@ -826,10 +1090,17 @@ function global:cc-status {
     Write-Host ""
     Write-Host "=== Claude Code Model Status ===" -ForegroundColor Cyan
     Write-Host "  Current : $current" -ForegroundColor Green
-    Write-Host "  Model   : $($json.model)" -ForegroundColor White
-    Write-Host "  Fallback: $($json.fallbackModel -join ', ')" -ForegroundColor Gray
     Write-Host "  Base URL: $baseUrl" -ForegroundColor Gray
     Write-Host "  Available: $($json.availableModels.Count) models" -ForegroundColor Gray
+
+    if ($json.taskModels) {
+        Write-Host ""
+        Write-Host "  Task Assignments:" -ForegroundColor Magenta
+        $json.taskModels.PSObject.Properties | Sort-Object Name | ForEach-Object {
+            $marker = if ($_.Value -eq $current) { " <-- current" } else { "" }
+            Write-Host "    $($_.Name) → $($_.Value)$marker" -ForegroundColor White
+        }
+    }
     Write-Host ""
 
     $groups = @{
@@ -872,22 +1143,32 @@ function global:Get-CCModel {
 
 function Show-CCMenu {
     $current = Get-CCModel
+    $json = Get-CCSettings
+
     Write-Host ""
     Write-Host "=== Claude Code Model Switcher ===" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "  cc-run <task>      Task-smart launch (code|quick|reason|image)" -ForegroundColor White
-    Write-Host "    cc-run code      Coding (gpt-5.5)" -ForegroundColor Gray
-    Write-Host "    cc-run quick     Fast (deepseek-v4-flash)" -ForegroundColor Gray
-    Write-Host "    cc-run reason    Deep analysis (qwen3.6-plus)" -ForegroundColor Gray
-    Write-Host "    cc-run image     Image gen (gpt-5.5 fallback)" -ForegroundColor Gray
+    if ($json -and $json.taskModels) {
+        Write-Host "    cc-run code      Coding ($($json.taskModels.code))" -ForegroundColor Gray
+        Write-Host "    cc-run quick     Fast ($($json.taskModels.quick))" -ForegroundColor Gray
+        Write-Host "    cc-run reason    Deep analysis ($($json.taskModels.reason))" -ForegroundColor Gray
+        Write-Host "    cc-run image     Image gen ($($json.taskModels.image))" -ForegroundColor Gray
+    } else {
+        Write-Host "    cc-run code      Coding" -ForegroundColor Gray
+        Write-Host "    cc-run quick     Fast" -ForegroundColor Gray
+        Write-Host "    cc-run reason    Deep analysis" -ForegroundColor Gray
+        Write-Host "    cc-run image     Image gen" -ForegroundColor Gray
+        Write-Host ""
+        Write-Host "  (Run 'cc' to auto-discover CPA models and assign tasks)" -ForegroundColor Yellow
+    }
     Write-Host ""
     Write-Host "  cc <model>         Switch and launch" -ForegroundColor White
-    Write-Host "  cc                 This menu" -ForegroundColor White
+    Write-Host "  cc                 Auto-discover CPA + this menu" -ForegroundColor White
+    Write-Host "  cc-config          View/override task-model assignments" -ForegroundColor White
     Write-Host "  cc-status          Full model inventory" -ForegroundColor White
     Write-Host "  cc-sync            Sync models from CPA" -ForegroundColor White
-    Write-Host "    cc-sync -List    Show full CPA model list" -ForegroundColor Gray
-    Write-Host "    cc-sync -Force   Auto-add new models" -ForegroundColor Gray
-    Write-Host "    cc-sync -Remove  Remove obsolete models" -ForegroundColor Gray
+    Write-Host "    cc-sync -Reassign  Sync + reassign task models" -ForegroundColor Gray
     Write-Host "  cc-test            Test all models for quota/health" -ForegroundColor White
     Write-Host "    cc-test -RemoveDead  Auto-remove failed models" -ForegroundColor Gray
     Write-Host ""
@@ -897,10 +1178,6 @@ function Show-CCMenu {
     Write-Host "  cc-profile <name>  Switch preset (default|minimal|dev)" -ForegroundColor White
     Write-Host "  cc-commands        List/manage custom commands" -ForegroundColor White
     Write-Host "  cc-theme           List/switch Oh My Posh theme" -ForegroundColor White
-    Write-Host ""
-    Write-Host "  cc-pro             claude-opus-4-7" -ForegroundColor White
-    Write-Host "  cc-fast            deepseek-v4-flash" -ForegroundColor White
-    Write-Host "  cc-default         gpt-5.5" -ForegroundColor White
     Write-Host ""
     Write-Host "Current: $current" -ForegroundColor Green
     Write-Host ""
@@ -933,6 +1210,15 @@ function Show-CCMenu {
         }} | ForEach-Object {
             $models = $cats[$_] -join "  "
             Write-Host "$($_):`t$models" -ForegroundColor Gray
+        }
+
+        # Show task assignment markers
+        if ($json.taskModels) {
+            Write-Host ""
+            Write-Host "Task assignments (cc-config to change):" -ForegroundColor Magenta
+            $json.taskModels.PSObject.Properties | Sort-Object Name | ForEach-Object {
+                Write-Host "  $($_.Name) → $($_.Value)" -ForegroundColor White
+            }
         }
     }
 }

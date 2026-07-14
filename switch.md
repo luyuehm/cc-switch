@@ -1,6 +1,6 @@
 ---
-description: "List models or switch Claude Code AI model, with CPA endpoint awareness"
-argument-hint: "[list | model_name]"
+description: "List, switch, or auto-configure Claude Code AI models with CPA endpoint awareness"
+argument-hint: "[list | model_name | --auto]"
 ---
 
 As a model switching expert, follow these steps exactly:
@@ -10,6 +10,7 @@ As a model switching expert, follow these steps exactly:
 **Purpose**: Get the latest model list from the CPA endpoint, compare with local `settings.json`, and automatically detect newly added/deprecated models.
 
 **Conditional execution**:
+- If parameters include `--auto` → **run full auto-discovery**: fetch CPA models and assign best model to each task level (code/quick/reason/image/default), save to `taskModels` in settings.json
 - If parameters include `--offline` → **skip this step entirely**, use `settings.json` static list only
 - If user explicitly requests `--status`, `--compare`, or `--verbose` → execute detection
 - If only a model name is provided (e.g. `/switch gpt-5.5`) → **skip detection**, switch directly
@@ -104,7 +105,26 @@ When user provides a model name or number, switch by modifying `settings.json`:
 |---------|--------|
 | `/switch` | List all models with CPA detection |
 | `/switch gpt-5.5` | Switch to GPT-5.5 |
+| `/switch --auto` | Auto-discover CPA models + assign best model per task level |
 | `/switch --offline` | List local models only (no network) |
 | `/switch --status` | CPA detection summary only |
 | `/switch --add <name>` | Add model to availableModels |
 | `/switch --remove <name>` | Remove model from availableModels |
+
+## Task Scheduling (via cc-switch CLI)
+
+After running `/switch --auto` or using `cc` from the terminal, the `taskModels` setting maps task types to models:
+
+```json
+{
+  "taskModels": {
+    "code": "claude-sonnet-4.6",
+    "quick": "deepseek-v4-flash",
+    "reason": "gpt-5.6-sol",
+    "image": "gpt-image-2",
+    "default": "gpt-5.5"
+  }
+}
+```
+
+Use `cc-run <task>` (from PowerShell) or `cc-config` to view/override.

@@ -2,59 +2,29 @@
 
 **Cross-platform** — macOS (bash/zsh) + Windows (PowerShell)
 
-One-stop solution for Claude Code CLI:
+**One-stop solution for Claude Code CLI:**
+- **Model Switching** — Switch AI models + OAuth bypass (no login)
+- **Auto Discovery** — `cc` auto-fetches CPA models and assigns best model per task
+- **Task Scheduling** — `cc-run` uses different models for code, quick, reason, image tasks
+- **CPA Sync** — Fetch, diff, add/remove models from your CPA proxy
+- **Skill Menu Management** — Audit, hide/show, preset profiles
+- **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
 
-- **Model Switching**: Switch AI models + OAuth bypass (no login)
-- **Dynamic Menu**: Model list auto-updates from your available models
-- **CPA Sync**: Fetch, diff, add/remove models from your CPA proxy
-- **Skill Menu Management**: Audit, hide/show, preset profiles
-- **Secret Management**: `.env` based API key config
-- **Terminal Enhancements**: Optional Oh My Posh, zoxide (macOS)
-
-Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch) (Windows/PowerShell).
+Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch).
 
 ---
 
 ## 🍎 macOS (bash/zsh)
 
-### Quick Start
-
 ```bash
-# One-line install
 curl -fsSL https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.sh | bash
-
-# Or manual
-bash install.sh
-source ~/.zshrc
+# or
+bash install.sh && source ~/.zshrc
 ```
 
-### Shell Commands
+## 🪟 Windows / PowerShell (pwsh)
 
-```bash
-cc                  # Show model selection menu
-cc <model>          # Switch model + launch Claude Code
-cc-pro              # Switch to claude-opus-4-7
-cc-fast             # Switch to deepseek-v4-flash
-cc-default          # Switch to gpt-5.5
-cc-status           # Show current model + full list
-cc-sync             # Fetch CPA models, diff with local
-cc-sync --list      # Show full CPA model list only
-cc-sync --force     # Auto-add new CPA models
-cc-sync --remove    # Remove obsolete models
-cc-audit            # Full skill visibility report
-cc-hide <skill>     # Hide a skill from Claude Code
-cc-show <skill>     # Restore a hidden skill
-cc-profile <preset> # Switch visibility preset (default|minimal|dev)
-cc-commands list    # List custom slash commands
-cc-commands create  # Create a new slash command
-cc-commands remove  # Remove a slash command
-cc-theme            # List Oh My Posh themes
-cc-theme <name>     # Switch theme (live preview)
-```
-
-- **Terminal Enhancements**: Optional Oh My Posh, file icons, smart cd
-
-*100% PowerShell — works on Windows (pwsh)*
+*Recommended path for CPA auto-discovery and task scheduling.*
 
 ---
 
@@ -69,7 +39,7 @@ irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex
 The installer will:
 ```
 [1/5] Install cc-switch core script
-[2/5] Install cc-menu skill management
+[2/5] Install /switch slash command + cc-menu skill management
 [3/5] Configure .env secrets
 [4/5] Update PowerShell profile
 [5/5] Ask to install pwsh terminal enhancements (Oh My Posh + zoxide + Terminal-Icons)
@@ -264,62 +234,54 @@ Updating credentials requires editing **one file**; all consumers
 (cc-switch, ccx, bare claude) pick up the change on next terminal start.
 
 ```bash
-ANTHROPIC_API_KEY=your-api-key-here
+ANTHROPIC_API_KEY=sk-ant-your-api-key-here
 ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 # Optional: separate endpoint for model list
 # CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 ```
 
-### Manual Install
-
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-# From local checkout:
-. .\install.ps1
-```
-
 ### Usage
 
 ```powershell
-# Reload profile
+# Reload profile (or restart terminal)
 . $PROFILE
 
-# Show menu (dynamic model list)
+# Auto-discover CPA models & assign to task levels — just run cc
 cc
 
-# Switch model + launch Claude Code
+# Then launch by task:
+cc-run code         # coding → best model (auto-selected)
+cc-run quick        # fast task
+cc-run reason       # deep analysis
+cc-run image        # image generation
+
+# Or switch and launch directly:
 cc gpt-5.5
 cc claude-sonnet-4
 
-# Task-smart launch (auto-selects best model for the job)
-cc-run code         # coding → claude-sonnet-4.6
-cc-run quick        # fast   → deepseek-v4-flash
-cc-run reason       # deep analysis → gpt-5.6-sol
-cc-run image        # image gen → gpt-image-2
-cc-run gpt-5.5      # or pass any model name directly
-
 # Quick shortcuts
-cc-pro         # claude-opus-4-7
-cc-fast        # deepseek-v4-flash
-cc-default     # gpt-5.5
+cc-pro              # code task model
+cc-fast             # quick task model
+cc-default          # default model
+
+# View/override task assignments
+cc-config
+cc-config code claude-sonnet-4.6
+cc-config -Reset
 
 # CPA model sync
-cc-sync              # fetch and diff
-cc-sync -List        # show full CPA model list only
-cc-sync -Force       # auto-add new models
-cc-sync -Remove      # auto-remove obsolete models
+cc-sync                  # fetch and diff
+cc-sync -Reassign        # sync + reassign task models
 
 # Test model health/quota
-cc-test              # test all models for availability
-cc-test -RemoveDead  # auto-remove failed models
+cc-test                  # test all models
+cc-test -RemoveDead      # remove failed models
 
 # Skill menu management
 cc-audit             # full visibility report
 cc-hide docx         # hide a skill
-cc-hide document-skills:*  # hide entire plugin
 cc-show docx         # restore
 cc-profile minimal   # switch preset
-cc-commands          # list/manage custom commands
 
 # Theme switching (Oh My Posh)
 cc-theme             # list 100+ themes
@@ -328,9 +290,85 @@ cc-theme catppuccin  # switch theme (live preview)
 
 ---
 
+## Installing cc-switch into Claude Code CLI
+
+### Method A: PowerShell Profile (dot-source) — Recommended
+
+After running `install.ps1`, cc-switch is added to your PowerShell profile. Every terminal session automatically loads it:
+
+```powershell
+# Verify it's loaded:
+cc
+```
+
+Your `$PROFILE` will contain (guarded with `# >>> cc-switch` / `# <<< cc-switch`):
+
+```powershell
+# >>> cc-switch — Claude Code Model Switcher
+if (Test-Path "$env:USERPROFILE\.claude\cc-switch.ps1") {
+    . "$env:USERPROFILE\.claude\cc-switch.ps1"
+}
+# <<< cc-switch
+```
+
+### Method B: Slash Command (inside Claude Code chat)
+
+For use inside Claude Code conversations (the `/switch` command), copy `switch.md` to your commands directory:
+
+```powershell
+# Auto-installed by install.ps1 step [2/5]
+# Manual install:
+copy switch.md ~\.claude\commands\switch.md
+```
+
+Then in any Claude Code session, use:
+```
+/switch              # List models + CPA detection
+/switch gpt-5.5      # Switch model
+/switch --status     # Detection summary
+/switch --offline    # Local list only
+```
+
+### Method C: In-Skill (for Claude Code / OpenClaw)
+
+The `skills/cc-menu/SKILL.md` defines Claude Code as a trigger skill. After `install.ps1` copies skills, type `/cc-menu` in Claude Code for interactive menu management (audit, hide/show skills, manage commands).
+
+---
+
 ## Features
 
-### 1. Model Switching + OAuth Bypass
+### 1. 🎯 CPA Auto Discovery + Task Scheduling (New)
+
+Run `cc` with no arguments to **auto-discover all CPA models** and **intelligently assign** the best model to each task level:
+
+| Task | Assignment Logic | Typical Model |
+|------|-----------------|---------------|
+| `code` | Claude → GPT → Qwen | claude-sonnet-4.6 |
+| `reason` | GPT-sol → GPT → Qwen-Plus → Claude | gpt-5.6-sol |
+| `quick` | DeepSeek → mini/flash → GPT-turbo | deepseek-v4-flash |
+| `image` | image-specific → GPT | gpt-image-2 |
+| `default` | GPT → DeepSeek → Claude → Qwen | gpt-5.5 |
+
+The assignment is saved to `settings.json → taskModels` and used by `cc-run`:
+
+```powershell
+# All use different models automatically
+cc-run code        # coding
+cc-run quick       # simple/fast
+cc-run reason      # deep analysis
+cc-run image       # image generation
+```
+
+View and override with `cc-config`:
+
+```powershell
+cc-config                          # show assignments
+cc-config code gpt-5.5             # override code task
+cc-config -Reset                   # re-run auto-discovery
+cc-sync -Reassign                  # sync + reassign
+```
+
+### 2. Model Switching + OAuth Bypass
 
 Launches Claude Code directly with API key auth (no login prompt):
 
@@ -340,9 +378,9 @@ cc deepseek-v4-flash
 cc gpt-5.5
 ```
 
-### 2. Dynamic Model Menu
+### 3. Dynamic Model Menu
 
-The `cc` menu no longer has hardcoded model names. It reads `availableModels` from `settings.json` and auto-categorizes models by provider:
+The `cc` menu reads `availableModels` from `settings.json` and auto-categorizes by provider:
 
 ```
 Current: gpt-5.5
@@ -352,11 +390,16 @@ Claude:     claude-sonnet-4.6  claude-opus-4-7
 DeepSeek:   deepseek-v4-flash  deepseek-v4-flash-free
 Grok:       grok-4.20-auto  grok-4.20-fast
 ...
+
+Task assignments (cc-config to change):
+  code    → claude-sonnet-4.6
+  quick   → deepseek-v4-flash
+  reason  → gpt-5.6-sol
+  image   → gpt-image-2
+  default → gpt-5.5
 ```
 
-After `cc-sync`, the menu updates automatically.
-
-### 3. CPA Model Sync
+### 4. CPA Model Sync
 
 ```powershell
 cc-sync
@@ -372,10 +415,9 @@ cc-sync
 | `-List` | Show full model list only, no sync |
 | `-Force` | Auto-add new models without prompt |
 | `-Remove` | Remove models no longer on CPA |
+| `-Reassign` | Sync + re-assign task models |
 
-### 4. Skill Menu Management
-
-Integrated from cc-menu:
+### 5. Skill Menu Management
 
 | Command | Description |
 |---------|-------------|
@@ -393,99 +435,76 @@ Integrated from cc-menu:
 | `minimal` | Hide docs/examples, financial/pitch only |
 | `dev` | Dev skills only, rest hidden |
 
-### 5. Secret Management via `.env`
+### 6. Secret Management via `.env`
 
 | File | Contains | Git? |
 |------|----------|------|
 | `.env.example` | Placeholders | Yes |
 | `~/.claude/cc-switch.env` | Real API key + CPA URL | No (`.gitignore`) |
 
-### 6. Terminal Enhancements (Optional)
+### 7. Terminal Enhancements (Optional)
 
 Installed via step [5/5] of the installer:
 
 | Tool | Version | Effect |
 |------|---------|--------|
-| **Oh My Posh** | v29.x | Colored prompt with git status, execution time |
+| **Oh My Posh** | v29+ | Colored prompt with git status, execution time |
 | **Terminal-Icons** | latest | File/folder icons in `ls` |
-| **zoxide** | v0.9.9 | Smart `cd` — learns your directories |
-
-**Theme switching:**
+| **zoxide** | v0.9+ | Smart `cd` — learns your directories |
 
 ```powershell
 cc-theme                    # list 100+ themes
 cc-theme catppuccin         # switch live (preview)
-cc-theme powerlevel10k_classic
-cc-theme montys
-cc-theme tokyonight_storm
 ```
-
-Popular themes marked with `=>` in the list. To make permanent, edit `$PROFILE` and update the `$poshTheme` path.
 
 ---
 
-## Configuration
+## Platform Support
 
-### `~/.claude/cc-switch.env`
+cc-switch works with **any API-compatible inference platform**. Configure via `~/.claude/cc-switch.env`:
+
+### CPA Proxy (Recommended)
 
 ```bash
-# Required: API key for auth
-ANTHROPIC_API_KEY=sk-ant-xxx
-
-# Required: Model inference endpoint (CPA proxy or direct API)
-ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
-
-# Optional: Separate endpoint for model list
-# CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
+ANTHROPIC_API_KEY=sk-ant-your-key
+ANTHROPIC_BASE_URL=https://your-cpa-instance.com/
 ```
 
-### `settings.json` (auto-managed by cc-switch)
+The CPA proxy provides a unified API gateway with model routing, quota management, and format translation.
 
-cc-switch reads/writes `~/.claude/settings.json`:
+### OpenAI / Azure OpenAI
 
-- `env.ANTHROPIC_MODEL`: Current model
-- `env.ANTHROPIC_API_KEY`: Fallback if `.env` not set
-- `env.ANTHROPIC_BASE_URL`: Fallback if `.env` not set
-- `availableModels`: Local model list (synced via `cc-sync`)
-- `skillOverrides`: Hidden skills (managed by `cc-hide`/`cc-profile`)
+```bash
+ANTHROPIC_API_KEY=sk-your-openai-key
+ANTHROPIC_BASE_URL=https://api.openai.com/v1
+# Separate model list URL for platforms with different endpoints
+CPA_MODELS_URL=https://api.openai.com/v1/models
+```
+
+### Local Inference (Ollama / vLLM / LM Studio)
+
+```bash
+ANTHROPIC_API_KEY=not-needed
+ANTHROPIC_BASE_URL=http://localhost:11434/v1
+```
+
+### Custom API Gateway (Kong / Tyk / Custom Proxy)
+
+```bash
+ANTHROPIC_API_KEY=your-gateway-key
+ANTHROPIC_BASE_URL=https://your-gateway.com/anthropic
+CPA_MODELS_URL=https://your-gateway.com/models
+```
+
+### Behind the scenes
+
+cc-switch sends Anthropic-format requests (`/v1/messages`). The CPA Cleaner proxy (`proxy_cpa_cleaner.py`) can translate between Anthropic ↔ OpenAI formats if your endpoint only supports OpenAI format.
 
 ---
 
-## Installer Details
+## CPA Cleaner Proxy (Advanced: Smart Router + Format Translation)
 
-Running `install.ps1` does:
-
-```
-[1/5] Copy cc-switch.ps1 to ~/.claude/
-[2/5] Copy cc-menu skills to ~/.claude/skills/
-[3/5] Create ~/.claude/cc-switch.env from template
-[4/5] Add Oh My Posh + Terminal-Icons + zoxide guards to $PROFILE
-[5/5] Optionally download and install pwsh tools (20 MB total)
-```
-
-Profile block added (safe — guards check if each tool exists):
-
-```powershell
-# Oh My Posh (prompt theme)
-if (Test-Path "C:\tools\oh-my-posh.exe") { ... }
-
-# Terminal Icons
-if (Get-Module -ListAvailable -Name Terminal-Icons) { ... }
-
-# zoxide (smart cd)
-if (Test-Path "C:\tools\zoxide.exe") { ... }
-
-# cc-switch core
-. $env:USERPROFILE\.claude\cc-switch.ps1
-```
-
----
-
-## Advanced: CPA Cleaner Proxy + Smart Router
-
-cc-switch includes cc-menu's CPA Cleaner with **intelligent task-based model routing** (方案 B).
-
-When enabled, the proxy analyzes each request's content and automatically routes to the optimal model:
+The optional Python proxy (port 8317) provides **intelligent task-based model routing** — analyzes each request's content and routes to the optimal model transparently:
 
 | Task Type | Routed Model | Trigger Keywords |
 |-----------|-------------|-----------------|
@@ -503,9 +522,6 @@ cc-menu cleaner start
 
 # Set in .env
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317
-
-# Test and register models
-cc-menu cleaner test
 ```
 
 ### CPA System Shim (port 8316)
@@ -560,8 +576,6 @@ environment before `exec`/`execvp`, exporting only `ANTHROPIC_AUTH_TOKEN`.
 
 ### Disable Smart Routing
 
-Set environment variable to disable content-based routing (uses model name as-is):
-
 ```bash
 CPA_SMART_ROUTING=false
 ```
@@ -569,35 +583,59 @@ CPA_SMART_ROUTING=false
 ### How It Works
 
 ```
-Claude Code (always sends "deepseek-v4-flash")
+Claude Code
     ↓
 Smart Router Proxy (localhost:8317)
     ↓ analyzes messages content
-    ├── "fix this bug"      → model=claude-sonnet-4.6 → CPA
-    ├── "画一只猫"           → model=gpt-image-2       → CPA
-    ├── "分析这两个方案"     → model=gpt-5.6-sol       → CPA
-    └── "hello world"       → model=deepseek-v4-flash  → CPA
+    ├── "fix this bug"      → claude-sonnet-4.6
+    ├── "分析这两个方案"     → gpt-5.6-sol
+    ├── "画一只猫"          → gpt-image-2
+    └── "hello world"       → deepseek-v4-flash
     ↓
-aws.richant.edu.kg
+CPA Proxy (your inference endpoint)
 ```
-
-All routing happens transparently — you just talk to Claude Code normally.
 
 ### Quota-Aware Fallback
 
-The proxy tracks model health in real-time:
+- **3 consecutive quota errors** (HTTP 429/403/402) → model marked **unhealthy**
+- Subsequent requests try the **next fallback** in chain
+- After **120 seconds** → auto-recovery
+- Each task type has its own fallback chain
 
-- **3 consecutive quota errors** (HTTP 429/403/402, or keywords like "额度不足", "rate limit", "insufficient_quota") → model marked **unhealthy**
-- Subsequent requests skip unhealthy models and try the **next fallback** in order
-- After **120 seconds** of no errors, the model **auto-recovers** and is tried again
-- Each task type has its own fallback chain (see `TASK_MODEL_MAP` in `proxy_cpa_cleaner.py`)
-
-Example fallback chain for `coding` task:
+Example fallback chain for `coding`:
 ```
-claude-sonnet-4.6 (primary) → gpt-5.5 → deepseek-v4-flash → qwen3.6-plus
+claude-sonnet-4.6 → gpt-5.5 → deepseek-v4-flash → qwen3.6-plus
 ```
 
 See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
+
+---
+
+## Configuration
+
+### `~/.claude/cc-switch.env` (secrets)
+
+```bash
+# Required
+ANTHROPIC_API_KEY=sk-ant-xxx
+ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
+
+# Optional: separate endpoint for model list
+# CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
+```
+
+### `settings.json` (auto-managed by cc-switch)
+
+Path: `~/.claude/settings.json`
+
+| Field | Managed By | Purpose |
+|-------|-----------|---------|
+| `env.ANTHROPIC_MODEL` | `cc <model>` | Current model for Claude Code |
+| `availableModels` | `cc-sync` | Local model list synced from CPA |
+| `taskModels` | `cc`, `cc-config` | Task-to-model assignments (code/quick/reason/image/default) |
+| `skillOverrides` | `cc-hide`/`cc-show`/`cc-profile` | Hidden skills control |
+| `env.ANTHROPIC_API_KEY` | `.env` fallback | API key fallback |
+| `env.ANTHROPIC_BASE_URL` | `.env` fallback | Endpoint fallback |
 
 ---
 
@@ -605,24 +643,59 @@ See `skills/cc-menu/docs/CPA-MultiModel-Cleaner-Guide.md` for details.
 
 ```
 cc-switch/
-├── cc-switch.sh          # Core functions: model switch + menu + theme (bash/zsh)
-├── cc-switch.ps1         # Core functions: model switch + menu + theme (PowerShell)
-├── install.sh            # macOS installer (bash)
-├── install.ps1           # Windows installer (PowerShell)
-├── .env.example          # Secret template
+├── cc-switch.sh               # Core functions: model switch + menu + theme (bash/zsh)
+├── cc-switch.ps1              # Core: model switch + auto-discovery + menu + theme (PowerShell)
+├── install.sh                 # macOS installer (bash)
+├── install.ps1                # Windows/pwsh 5-step installer
+├── profile-backup.ps1         # Optional pwsh utilities
+├── .env.example               # Secret template
 ├── .gitignore
 ├── LICENSE
 ├── README.md
-├── switch.md             # Slash command reference (cross-platform)
-└── skills/cc-menu/       # CPA Cleaner scripts (Python, cross-platform)
-    ├── SKILL.md
+├── switch.md                  # Slash command reference (/switch, cross-platform)
+├── THINKING_MODE_FIX.md       # reasoning_content → Anthropic thinking blocks fix
+├── docs/
+│   └── pwsh-usage-guide.md    # PowerShell usage manual (Chinese)
+├── .claude/
+│   └── settings.local.json    # Claude Code permission overrides
+└── skills/cc-menu/
+    ├── SKILL.md               # Claude Code skill definition
     ├── bin/
-    │   ├── cc-menu.sh
-    │   ├── proxy_cpa_cleaner.py
+    │   ├── cc-menu.sh         # Shell CLI: audit, hide/show skills
+    │   ├── proxy_cpa_cleaner.py     # Anthropic↔OpenAI proxy + smart router
     │   └── test_and_register_models.py
     └── docs/
         └── CPA-MultiModel-Cleaner-Guide.md
 ```
+
+---
+
+## Command Reference
+
+| Command | Description |
+|---------|-------------|
+| `cc` | Auto-discover CPA models + assign tasks + show menu |
+| `cc <model>` | Switch to model + launch Claude Code |
+| `cc-run <task>` | Launch with task-optimized model (code/quick/reason/image) |
+| `cc-config` | View current task-model assignments |
+| `cc-config <task> <model>` | Override task model |
+| `cc-config -Reset` | Re-run CPA auto-discovery |
+| `cc-status` | Full model inventory with task assignments |
+| `cc-sync` | Sync model list from CPA |
+| `cc-sync -Reassign` | Sync + reassign task models |
+| `cc-test` | Test all models for quota/health |
+| `cc-test -RemoveDead` | Remove failed models |
+| `cc-pro` | Switch to code task model |
+| `cc-fast` | Switch to quick task model |
+| `cc-default` | Switch to default model |
+| `cc-audit` | Audit skill visibility |
+| `cc-hide <skill>` | Hide skill |
+| `cc-show <skill>` | Restore hidden skill |
+| `cc-profile <name>` | Switch preset (default/minimal/dev) |
+| `cc-commands` | Manage custom slash commands |
+| `cc-theme` | List/switch Oh My Posh themes |
+
+---
 
 ## Related
 
