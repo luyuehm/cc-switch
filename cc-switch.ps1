@@ -107,7 +107,121 @@ function Get-CPAModelList {
 
 <#
 .SYNOPSIS
+    Ping a single model to verify it's healthy and responding.
+    Returns $true if the model responds successfully, $false otherwise.
+#>
+function Test-ModelHealth {
+    param(
+        [string]$ModelName,
+        [int]$Timeout = 10
+    )
+
+    $ep = Resolve-CPAEndpoint
+    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
+        $json = Get-CCSettings
+        if ($json -and $json.env.ANTHROPIC_BASE_URL) { $json.env.ANTHROPIC_BASE_URL } else { $null }
+    }
+    if (-not $baseUrl -or -not $ep.ApiKey) { return $false }
+
+    $headers = @{
+        "Content-Type" = "application/json"
+        "Authorization" = "Bearer $($ep.ApiKey)"
+        "anthropic-version" = "2023-06-01"
+    }
+
+    $body = @{
+        model    = $ModelName
+        messages = @(@{ role = "user"; content = "ping" })
+        max_tokens = 5
+    } | ConvertTo-Json
+
+    try {
+        $response = Invoke-RestMethod -Uri "$baseUrl/v1/messages" `
+            -Method Post `
+            -Headers $headers `
+            -Body $body `
+            -ContentType "application/json" `
+            -TimeoutSec $Timeout `
+            -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+<#
+.SYNOPSIS
+    Test multiple models in parallel and return the first healthy one,
+    or $null if none respond.
+.PARAMETER Candidates
+    Ordered array of model names, in priority order (best first).
+.PARAMETER Timeout
+    Seconds to wait per model test (default 10).
+#>
+function Select-HealthyModel {
+    param(
+        [string[]]$Candidates,
+        [int]$Timeout = 10
+    )
+
+    if ($Candidates.Count -eq 0) { return $null }
+    if ($Candidates.Count -eq 1) {
+        # Single candidate: test inline, no parallel overhead
+        if (Test-ModelHealth -ModelName $Candidates[0] -Timeout $Timeout) {
+            return $Candidates[0]
+        }
+        return $null
+    }
+
+    # Sort candidates so shorter names get tested first as a rough speed heuristic
+    $sorted = $Candidates | Sort-Object Length
+    $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
+    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
+        $json = Get-CCSettings
+        if ($json -and $json.env.ANTHROPIC_BASE_URL) { $json.env.ANTHROPIC_BASE_URL } else { $null }
+    }
+    $ep = Resolve-CPAEndpoint
+
+    $sorted | ForEach-Object -Parallel {
+        $modelName = $_
+        $baseUrl = $using:baseUrl
+        $apiKey = $using:ep.ApiKey
+        $timeout = $using:Timeout
+        $results = $using:results
+
+        $headers = @{
+            "Content-Type" = "application/json"
+            "Authorization" = "Bearer $apiKey"
+            "anthropic-version" = "2023-06-01"
+        }
+        $body = @{
+            model    = $modelName
+            messages = @(@{ role = "user"; content = "ping" })
+            max_tokens = 5
+        } | ConvertTo-Json
+
+        try {
+            $null = Invoke-RestMethod -Uri "$baseUrl/v1/messages" `
+                -Method Post -Headers $headers -Body $body `
+                -ContentType "application/json" -TimeoutSec $timeout -ErrorAction Stop
+            $results.Add(@{ model = $modelName; status = "healthy" })
+        } catch {
+            $results.Add(@{ model = $modelName; status = "failed" })
+        }
+    } -ThrottleLimit 5
+
+    # Return the first healthy model in original priority order
+    $healthy = @($results | Where-Object { $_.status -eq "healthy" } | ForEach-Object { $_.model })
+    foreach ($m in $Candidates) {
+        if ($m -in $healthy) { return $m }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
     Auto-discover CPA models and assign the best model to each task type.
+    Each candidate is health-checked before assignment.
     Results saved to settings.json → taskModels.
 #>
 function Invoke-CCAutoAssign {
@@ -124,7 +238,6 @@ function Invoke-CCAutoAssign {
     }
 
     # Categorize models by vendor prefix
-    # Sort descending so [-1] picks the "best" (largest version number) model
     $claude = @($cpaModels | Where-Object { $_ -imatch "^claude|^sonnet|^haiku" } | Sort-Object)
     $gpt    = @($cpaModels | Where-Object { $_ -imatch "^(gpt|o\d)" } | Sort-Object)
     $ds     = @($cpaModels | Where-Object { $_ -imatch "^deepseek" } | Sort-Object)
@@ -142,58 +255,71 @@ function Invoke-CCAutoAssign {
 
     $assign = @{}
 
-    # code → best coding model: pick the highest-tier Claude (opus/sonnet > haiku)
-    # Sort "opus" last so it's preferred; filter haiku only as last resort
-    $codeClaude = @($claudePaid | Where-Object { $_ -inotmatch "haiku" })
-    if    ($codeClaude.Count -gt 0) { $assign.code = $codeClaude[-1] }                # claude-sonnet-4.6 or opus
-    elseif ($claudePaid.Count -gt 0) { $assign.code = $claudePaid[-1] }               # claude-haiku (only option)
-    elseif ($gptPaid.Count -gt 0)   { $assign.code = $gptPaid[-1] }                   # best GPT
-    elseif ($qwenPaid.Count -gt 0)  { $assign.code = $qwenPaid[-1] }                  # best Qwen
-    elseif ($all.Count -gt 0)       { $assign.code = $all[-1] }                        # anything
+    Write-Host "  Testing model health" -ForegroundColor Gray -NoNewline
 
-    # reason → strongest reasoning: GPT reasoning variants first, then Qwen Plus/Max, then Claude thinking
-    $reasonGpt = @($gptPaid | Where-Object { $_ -imatch "sol|reason|preview|thinking" })
-    if    ($reasonGpt.Count -gt 0) { $assign.reason = $reasonGpt[-1] }
-    elseif ($gptPaid.Count -gt 0)  { $assign.reason = $gptPaid[-1] }
-    else {
-        $reasonQwen = @($qwenPaid | Where-Object { $_ -imatch "plus|max|preview" })
-        if    ($reasonQwen.Count -gt 0) { $assign.reason = $reasonQwen[-1] }
-        elseif ($qwenPaid.Count -gt 0)  { $assign.reason = $qwenPaid[-1] }
-        else {
-            $thinkClaude = @($claudePaid | Where-Object { $_ -imatch "thinking" })
-            if    ($thinkClaude.Count -gt 0) { $assign.reason = $thinkClaude[-1] }
-            elseif ($claudePaid.Count -gt 0) { $assign.reason = $claudePaid[-1] }
-            elseif ($all.Count -gt 0)        { $assign.reason = $all[-1] }
-        }
-    }
+    # --- code: Claude (non-haiku) → Claude (any) → GPT → Qwen → anything ---
+    $codeCandidates = @()
+    $codeCandidates += @($claudePaid | Where-Object { $_ -inotmatch "haiku" })
+    $codeCandidates += @($claudePaid)
+    $codeCandidates += @($gptPaid)
+    $codeCandidates += @($qwenPaid)
+    $codeCandidates += @($all)
+    $selected = Select-HealthyModel -Candidates $codeCandidates
+    if ($selected) { $assign.code = $selected }
 
-    # quick → fastest/cheapest: DeepSeek flash first, then mini/turbo variants
-    $dsFlash = @($dsPaid | Where-Object { $_ -imatch "flash" })
-    if    ($dsFlash.Count -gt 0) { $assign.quick = $dsFlash[0] }
-    elseif ($dsPaid.Count -gt 0) { $assign.quick = $dsPaid[0] }
-    else {
-        $fastGpt = @($gptPaid | Where-Object { $_ -imatch "mini|flash|turbo|light|lite" })
-        if    ($fastGpt.Count -gt 0) { $assign.quick = $fastGpt[0] }
-        else {
-            $fastQwen = @($qwenPaid | Where-Object { $_ -imatch "flash|turbo|light" })
-            if    ($fastQwen.Count -gt 0) { $assign.quick = $fastQwen[0] }
-            elseif ($grok.Count -gt 0)    { $assign.quick = $grok[0] }
-            elseif ($all.Count -gt 0)     { $assign.quick = $all[0] }
-        }
-    }
+    Write-Host "." -ForegroundColor Gray -NoNewline
 
-    # image → image-specific model, fallback to GPT
-    if    ($image.Count -gt 0)     { $assign.image = $image[0] }
-    elseif ($gptPaid.Count -gt 0)  { $assign.image = $gptPaid[0] }
-    elseif ($grok.Count -gt 0)     { $assign.image = ($grok | Where-Object { $_ -imatch "image" })[0] }
-    elseif ($all.Count -gt 0)      { $assign.image = $all[0] }
+    # --- reason: GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything ---
+    $reasonCandidates = @()
+    $reasonCandidates += @($gptPaid | Where-Object { $_ -imatch "sol|reason|preview|thinking" })
+    $reasonCandidates += @($gptPaid)
+    $reasonCandidates += @($qwenPaid | Where-Object { $_ -imatch "plus|max|preview" })
+    $reasonCandidates += @($qwenPaid)
+    $reasonCandidates += @($claudePaid | Where-Object { $_ -imatch "thinking" })
+    $reasonCandidates += @($claudePaid)
+    $reasonCandidates += @($all)
+    $selected = Select-HealthyModel -Candidates $reasonCandidates
+    if ($selected) { $assign.reason = $selected }
 
-    # default → balanced general-purpose: GPT first, then DeepSeek, then Claude, then Qwen
-    if    ($gptPaid.Count -gt 0)   { $assign.default = $gptPaid[0] }
-    elseif ($dsPaid.Count -gt 0)   { $assign.default = $dsPaid[0] }
-    elseif ($claudePaid.Count -gt 0) { $assign.default = $claudePaid[0] }
-    elseif ($qwenPaid.Count -gt 0) { $assign.default = $qwenPaid[0] }
-    elseif ($all.Count -gt 0)     { $assign.default = $all[0] }
+    Write-Host "." -ForegroundColor Gray -NoNewline
+
+    # --- quick: DeepSeek flash → DeepSeek → GPT mini/turbo → Qwen flash → Grok → anything ---
+    $quickCandidates = @()
+    $quickCandidates += @($dsPaid | Where-Object { $_ -imatch "flash" })
+    $quickCandidates += @($dsPaid)
+    $quickCandidates += @($gptPaid | Where-Object { $_ -imatch "mini|flash|turbo|light|lite" })
+    $quickCandidates += @($gptPaid)
+    $quickCandidates += @($qwenPaid | Where-Object { $_ -imatch "flash|turbo|light" })
+    $quickCandidates += @($qwenPaid)
+    $quickCandidates += @($grok)
+    $quickCandidates += @($all)
+    $selected = Select-HealthyModel -Candidates $quickCandidates
+    if ($selected) { $assign.quick = $selected }
+
+    Write-Host "." -ForegroundColor Gray -NoNewline
+
+    # --- image: image-specific → GPT → Grok image → anything ---
+    $imageCandidates = @()
+    $imageCandidates += @($image)
+    $imageCandidates += @($gptPaid)
+    $imageCandidates += @($grok | Where-Object { $_ -imatch "image" })
+    $imageCandidates += @($all)
+    $selected = Select-HealthyModel -Candidates $imageCandidates
+    if ($selected) { $assign.image = $selected }
+
+    Write-Host "." -ForegroundColor Gray -NoNewline
+
+    # --- default: GPT → DeepSeek → Claude → Qwen → anything ---
+    $defaultCandidates = @()
+    $defaultCandidates += @($gptPaid)
+    $defaultCandidates += @($dsPaid)
+    $defaultCandidates += @($claudePaid)
+    $defaultCandidates += @($qwenPaid)
+    $defaultCandidates += @($all)
+    $selected = Select-HealthyModel -Candidates $defaultCandidates
+    if ($selected) { $assign.default = $selected }
+
+    Write-Host " [done]" -ForegroundColor Gray
 
     # Also sync availableModels if CPA returned models
     $json = Get-CCSettings
