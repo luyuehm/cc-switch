@@ -28,15 +28,19 @@ Single PowerShell file. All functions are `global:` scope for availability after
 - `Select-HealthyModel` — sequential testing with early exit (tests in priority order, stops at first healthy). Uses cache to skip previously-failed models. **Greatly reduces API calls compared to old parallel-all approach.**
 - `Clear-StaleHealthCache` — purges expired entries before a fresh auto-assign
 
+**Final verification (v2.2.1):**
+- After all 5 task groups are assigned, each model is re-pinged
+- If a model is stale/rate-limited, on-demand fallback probes next candidate
+- Cache freshness check (20s threshold) avoids redundant re-pings
+- **Guarantees all assigned models are healthy before saving to settings.json**
+
 **CPA auto-discovery:**
 - `Get-CPAModelList` — fetches model list from CPA endpoint, shared by `cc`, `cc-sync`, and `Invoke-CCAutoAssign`
-- `Invoke-CCAutoAssign` — categorizes models by vendor prefix via `Group-ModelsByCategory`, then intelligently assigns the best model to each task type (sequential health probing with shared cache across task groups):
-  - `code` → Claude non-haiku → Claude → GPT → Qwen → anything
-  - `reason` → GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything
-  - `quick` → DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything
-  - `image` → image-specific → GPT → Grok image → anything
-  - `default` → GPT → DeepSeek → Claude → Qwen → anything
-- Results saved to `settings.json → taskModels`
+- `Invoke-CCAutoAssign` — **two-phase health verification**:
+  - Phase 1: Sequential per-group probing with shared cache (~12 unique probes)
+  - Phase 2: Re-ping each assigned model; on-demand category-prioritized fallback if stale
+  - Limited "anything" fallback to first 20 models (avoids 150+ probes)
+  - ~12 probes total, all 5 task models guaranteed healthy before saving
 
 **Command functions (all callable after dot-sourcing):**
 

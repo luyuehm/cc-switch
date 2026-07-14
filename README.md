@@ -341,7 +341,7 @@ The `skills/cc-menu/SKILL.md` defines Claude Code as a trigger skill. After `ins
 
 ### 1. 🎯 CPA Auto Discovery + Task Scheduling (New)
 
-Run `cc` with no arguments to **auto-discover all CPA models** and **intelligently assign** the best model to each task level. Each model is health-checked before assignment — unhealthy models are skipped and cached for 60s:
+Run `cc` with no arguments to **auto-discover all CPA models** and **intelligently assign** the best model to each task level. Each model is health-checked before assignment, and a **final verification phase** re-pings each assigned model to catch rate-limit or stale failures:
 
 | Task | Assignment Logic | Typical Model |
 |------|-----------------|---------------|
@@ -350,6 +350,8 @@ Run `cc` with no arguments to **auto-discover all CPA models** and **intelligent
 | `quick` | DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything | deepseek-v4-flash |
 | `image` | image-specific → GPT → Grok image → anything | gpt-image-2 |
 | `default` | GPT → DeepSeek → Claude → Qwen → anything | gpt-5.5 |
+
+**Health guarantee:** All 5 task models are verified healthy before saving to `settings.json`. If a model is stale/rate-limited, the next candidate in the priority chain is probed automatically. The "anything" fallback is limited to the first 20 models to avoid probing 150+ models.
 
 The assignment is saved to `settings.json → taskModels` and used by `cc-run`:
 
