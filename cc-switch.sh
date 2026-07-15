@@ -270,6 +270,9 @@ cc-sync() {
     json="$(__cc_read_settings 2>/dev/null)" || true
     if [[ -n "$json" ]]; then
       api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
+      if [[ -z "$api_key" ]]; then
+        api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN','')")"
+      fi
     fi
   fi
 

@@ -8,6 +8,10 @@
 - **Task Scheduling** — `cc-run` uses different models for code, quick, reason, image tasks
 - **Health-Aware Fallback** — Models are health-checked before assignment; `cc-run` falls back to a healthy model if the primary is unresponsive
 - **Smart Health Cache** — 60s TTL cache avoids redundant API pings; sequential early-exit probing minimizes requests
+- **Final Verification (v2.3.0)** — All assigned models are re-pinged before saving; cache bypassed for fresh probes; hard guard aborts if all models fail
+- **Runtime 503 Detection** — `cc` captures stderr for 503/overloaded errors and suggests recovery commands
+- **Hidden Error Body Detection** — `Test-ModelHealth` inspects response body for error indicators even on HTTP 200
+- **Auth Priority** — `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`; `API_KEY` cleared before launch to avoid "Both set" warning
 - **CPA Sync** — Fetch, diff, add/remove models from your CPA proxy
 - **Skill Menu Management** — Audit, hide/show, preset profiles
 - **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
@@ -80,16 +84,21 @@ iwr -Uri https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | 
 ### Shell Commands (PowerShell)
 
 ```powershell
-cc                  # Show model selection menu
-cc <model>          # Switch model, prompts to launch Claude Code
-cc-pro              # Switch to claude-opus-4-7
-cc-fast             # Switch to deepseek-v4-flash
-cc-default          # Switch to gpt-5.5
+cc                  # Auto-discover CPA models + assign tasks + show menu
+cc <model>          # Pre-switch health check → switch model → launch Claude Code
+cc-run <task>       # Launch with task-optimized model (code/quick/reason/image)
+cc-config           # View/override task-model assignments
+cc-pro              # Switch to code task model
+cc-fast             # Switch to quick task model
+cc-default          # Switch to default model
 cc-status           # Show current model + full list
 cc-sync             # Fetch CPA models, diff with local
 cc-sync --list      # Show full CPA model list only
 cc-sync --force     # Auto-add new CPA models
 cc-sync --remove    # Remove obsolete models
+cc-sync -Reassign   # Sync + reassign task models
+cc-test             # Test all models for quota/health
+cc-test -RemoveDead # Remove failed models
 cc-audit            # Full skill visibility report
 cc-hide <skill>     # Hide a skill from Claude Code
 cc-show <skill>     # Restore a hidden skill
@@ -97,6 +106,7 @@ cc-profile <preset> # Switch visibility preset (default|minimal|dev)
 cc-commands list    # List custom slash commands
 cc-commands create  # Create a new slash command
 cc-commands remove  # Remove a slash command
+cc-theme            # List/switch Oh My Posh themes
 ```
 
 ### Configure Secrets (Windows)
@@ -147,17 +157,19 @@ The `/switch` slash command works inside Claude Code on both macOS and Windows. 
 When both `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` are set in the environment
 (common in managed setups where automation tools manage `API_KEY`
 while a separate CPA proxy key is provided as `AUTH_TOKEN`), cc-switch now
-reads `AUTH_TOKEN` first before falling back to `API_KEY`:
+reads `AUTH_TOKEN` first before falling back to `API_KEY`. Additionally,
+the PowerShell version (`cc-switch.ps1`) also follows this priority chain:
 
-```bash
-# Current priority (v2.1+):
-if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
-    auth_key="***"        # 1st choice: Bearer token
-elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    auth_key="***"           # 2nd choice: API key
-else
-    auth_key="$(settings.json ...)"         # 3rd choice: stored config
-fi
+```powershell
+# Current priority (v2.3.0+):
+$authKey = if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN }          # 1st: Bearer token
+elseif ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY }                        # 2nd: API key
+elseif ($json.env.ANTHROPIC_AUTH_TOKEN) { $json.env.ANTHROPIC_AUTH_TOKEN }        # 3rd: stored AUTH_TOKEN
+else { $json.env.ANTHROPIC_API_KEY }                                              # 4th: stored API key
+
+# Before launching claude.exe: clear API_KEY to avoid "Both set" warning
+$env:ANTHROPIC_AUTH_TOKEN = $authKey
+$env:ANTHROPIC_API_KEY = $null
 ```
 
 This prevents sending wrong credentials when multiple keys coexist in
@@ -351,7 +363,7 @@ Run `cc` with no arguments to **auto-discover all CPA models** and **intelligent
 | `image` | image-specific → GPT → Grok image → anything | gpt-image-2 |
 | `default` | GPT → DeepSeek → Claude → Qwen → anything | gpt-5.5 |
 
-**Health guarantee:** All 5 task models are verified healthy before saving to `settings.json`. If a model is stale/rate-limited, the next candidate in the priority chain is probed automatically. The "anything" fallback is limited to the first 20 models to avoid probing 150+ models.
+**Health guarantee:** All 5 task models are **always re-pinged** before saving (cache bypassed via `$script:CC_HEALTH_CACHE.Remove`). If a model fails verification, the next candidate in the priority chain is probed (also bypassing cache). If all 5 tasks lose their model, the hard guard aborts without modifying `settings.json`. The "anything" fallback is limited to the first 20 models to avoid probing 150+ models.
 
 The assignment is saved to `settings.json → taskModels` and used by `cc-run`:
 
@@ -363,7 +375,7 @@ cc-run reason      # deep analysis
 cc-run image       # image generation
 ```
 
-**Health-aware fallback:** Before launching, `cc-run` verifies the assigned model is responsive. If not, it automatically searches for a healthy fallback model. Failed models are cached (60s TTL) to avoid repeated pings across task groups.
+**Health-aware fallback:** Before launching, `cc-run` **bypasses the health cache** (always does a fresh probe) to catch rate-limited or stale models. If the assigned model is unresponsive, it searches for a healthy fallback within the same vendor category first, then across all available models (also bypassing cache at each step).
 
 View and override with `cc-config`:
 
@@ -649,8 +661,8 @@ Path: `~/.claude/settings.json`
 
 ```
 cc-switch/
-├── cc-switch.sh               # Core functions: model switch + menu + theme (bash/zsh, 848 lines)
-├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~1390 lines)
+├── cc-switch.sh               # Core functions: model switch + menu + theme (bash/zsh, 854 lines)
+├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~1516 lines)
 ├── install.sh                 # macOS installer (bash)
 ├── install.ps1                # Windows/pwsh 5-step installer
 ├── profile-backup.ps1         # Optional pwsh utilities
@@ -681,7 +693,7 @@ cc-switch/
 | Command | Description |
 |---------|-------------|
 | `cc` | Auto-discover CPA models + assign tasks + show menu |
-| `cc <model>` | Switch to model + launch Claude Code |
+| `cc <model>` | Pre-switch health check → atomic model switch (updates 10+ fields), then launches `claude.exe --bare` with stderr capture for 503 detection |
 | `cc-run <task>` | Launch with task-optimized model (code/quick/reason/image) |
 | `cc-config` | View current task-model assignments |
 | `cc-config <task> <model>` | Override task model |

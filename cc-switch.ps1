@@ -73,9 +73,14 @@ function Resolve-CPAEndpoint {
         if ($baseUrl) { "$baseUrl/v1/models" } else { "" }
     }
 
+    # Support both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN (parity with shell version)
     $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
-        $json = Get-CCSettings
-        if ($json -and $json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else { "" }
+        if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN } else {
+            $json = Get-CCSettings
+            if ($json -and $json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else {
+                if ($json -and $json.env.ANTHROPIC_AUTH_TOKEN) { $json.env.ANTHROPIC_AUTH_TOKEN } else { "" }
+            }
+        }
     }
 
     return @{ Url = $cpaUrl; ApiKey = $apiKey }
@@ -219,9 +224,9 @@ function Test-ModelHealth {
     if ($null -ne $cached) { return $cached }
 
     $ep = Resolve-CPAEndpoint
-    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
+    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL -replace '/+$', '' } else {
         $json = Get-CCSettings
-        if ($json -and $json.env.ANTHROPIC_BASE_URL) { $json.env.ANTHROPIC_BASE_URL } else { $null }
+        if ($json -and $json.env.ANTHROPIC_BASE_URL) { $json.env.ANTHROPIC_BASE_URL -replace '/+$', '' } else { $null }
     }
     if (-not $baseUrl -or -not $ep.ApiKey) { return $false }
 
@@ -231,8 +236,11 @@ function Test-ModelHealth {
         "anthropic-version" = "2023-06-01"
     }
 
+    # Use a slightly more realistic payload (tiny system prompt + user message)
+    # to better exercise the proxy/model pipeline
     $body = @{
         model    = $ModelName
+        system   = "You are a helpful assistant."
         messages = @(@{ role = "user"; content = "ping" })
         max_tokens = 5
     } | ConvertTo-Json
@@ -245,6 +253,14 @@ function Test-ModelHealth {
             -ContentType "application/json" `
             -TimeoutSec $Timeout `
             -ErrorAction Stop
+
+        # Also check response body for hidden error indicators (some proxies return 200 with error body)
+        $bodyText = if ($response) { $response | ConvertTo-Json -Compress -Depth 3 } else { "" }
+        if ($bodyText -imatch '"error"' -or $bodyText -imatch '"overloaded"' -or $bodyText -imatch '"unavailable"') {
+            Set-CachedHealth -ModelName $ModelName -Healthy $false
+            return $false
+        }
+
         Set-CachedHealth -ModelName $ModelName -Healthy $true
         return $true
     } catch {
@@ -386,16 +402,15 @@ function Invoke-CCAutoAssign {
     $selected = Select-HealthyModel -Candidates $defaultCandidates
     if ($selected) { $assign.default = $selected }
 
-    # ── Phase 2: Final verification — re-confirm each assigned model is healthy ──
-    # If a model was probed early in phase 1 and is now stale/rate-limited, fallback
+    # ── Phase 2: Final verification — ALWAYS re-ping each assigned model ──
+    # No freshness shortcut: every model must pass a health check right before saving.
+    # This catches rate-limiting, proxy downtime, and models that only fail under load.
     foreach ($task in @($assign.Keys)) {
         $model = $assign[$task]
-        # Skip if cache entry is fresh (< 20s old)
-        $entry = $script:CC_HEALTH_CACHE[$model]
-        $fresh = $entry -and ((Get-Date) - $entry.Timestamp).TotalSeconds -lt 20 -and $entry.Healthy
-        if ($fresh) { continue }
-
+        # Force a real health check (ignore cache — we want a fresh result)
         Write-Host "!" -ForegroundColor Gray -NoNewline
+        # Bypass cache: delete the cache entry so Test-ModelHealth does a real probe
+        $script:CC_HEALTH_CACHE.Remove($model)
         if (-not (Test-ModelHealth -ModelName $model -Timeout 10)) {
             Write-Host "`n  [FALLBACK]  $model unhealthy for '$task', searching..." -ForegroundColor Yellow
             # Build fallback candidates for this task
@@ -410,8 +425,6 @@ function Invoke-CCAutoAssign {
             $newSelected = $null
             foreach ($m in $fallbackCandidates) {
                 if ($m -eq $model) { continue }
-                $cached = Get-CachedHealth -ModelName $m
-                if ($null -ne $cached -and $cached) { $newSelected = $m; break }
                 Write-Host "." -ForegroundColor Gray -NoNewline
                 if (Test-ModelHealth -ModelName $m -Timeout 10) { $newSelected = $m; break }
             }
@@ -426,6 +439,16 @@ function Invoke-CCAutoAssign {
     }
 
     Write-Host " [done]" -ForegroundColor Gray
+
+    # ── Phase 3: Hard guard — if ALL tasks lost their model, abort ──
+    if ($assign.Count -eq 0) {
+        Write-Host "`n[!]  No healthy models found at all. Settings NOT saved." -ForegroundColor Red
+        Write-Host "  Check your CPA proxy or API key: cc-switch.env" -ForegroundColor Yellow
+        Write-Host "  Then run 'cc' again." -ForegroundColor Yellow
+        return $null
+    }
+    $totalTasks = if ($assign.Count -lt 5) { " ($($assign.Count)/5 tasks assigned)" } else { "" }
+    Write-Host "  All $($assign.Count) assigned models verified healthy$totalTasks" -ForegroundColor Green
 
     $json = Get-CCSettings
     if ($json -and $cpaModels) {
@@ -472,6 +495,18 @@ function global:cc {
         return
     }
 
+    # Health-check the model BEFORE switching — don't save a broken model
+    Write-Host "Probing $Model..." -ForegroundColor Gray -NoNewline
+    $script:CC_HEALTH_CACHE.Remove($Model)
+    if (-not (Test-ModelHealth -ModelName $Model -Timeout 10)) {
+        Write-Host " [unhealthy]" -ForegroundColor Yellow
+        Write-Host "[!]  $Model is not responding. Switch cancelled." -ForegroundColor Yellow
+        Write-Host "  Try: cc (no args) to auto-assign a healthy model" -ForegroundColor Gray
+        Write-Host "  Or:  cc-test           to list healthy models" -ForegroundColor Gray
+        return
+    }
+    Write-Host " [ok]" -ForegroundColor Green
+
     $oldModel = $json.env.ANTHROPIC_MODEL
 
     # Atomic switch — all model refs
@@ -499,17 +534,50 @@ function global:cc {
 
     # .env values already loaded by Load-CCEnv at script import.
     # If not set, fall back to settings.json values.
-    if (-not $env:ANTHROPIC_API_KEY) {
-        $env:ANTHROPIC_API_KEY = $json.env.ANTHROPIC_API_KEY
+    # Priority: ANTHROPIC_AUTH_TOKEN > ANTHROPIC_API_KEY (matching claude.exe preference)
+    $authKey = if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN } else {
+        if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
+            if ($json.env.ANTHROPIC_AUTH_TOKEN) { $json.env.ANTHROPIC_AUTH_TOKEN } else {
+                $json.env.ANTHROPIC_API_KEY
+            }
+        }
+    }
+    if ($authKey) {
+        # claude.exe prefers ANTHROPIC_AUTH_TOKEN; set it and clear API_KEY to avoid "Both values set" warning
+        $env:ANTHROPIC_AUTH_TOKEN = $authKey
+        $env:ANTHROPIC_API_KEY = $null
     }
     if (-not $env:ANTHROPIC_BASE_URL) {
         $env:ANTHROPIC_BASE_URL = $json.env.ANTHROPIC_BASE_URL
     }
 
-    Write-Host "Launching Claude Code (API key auth, --bare)..." -ForegroundColor Cyan
+    Write-Host "Launching Claude Code (auth token, --bare)..." -ForegroundColor Cyan
     Write-Host ""
 
-    & $claudeExe --bare
+    # Capture stderr to detect 503 at runtime
+    $errorOutput = $null
+    try {
+        & $claudeExe --bare 2>&1 | ForEach-Object {
+            if ($_ -is [System.Management.Automation.ErrorRecord]) {
+                $errorOutput = $_.Exception.Message
+                Write-Host $_ -ForegroundColor Red
+                # Check for 503 / overloaded / unavailable
+                if ($_.Exception.Message -imatch "503|overloaded|unavailable|capacity|too many requests") {
+                    Write-Host ""
+                    Write-Host "[!]  Model returned 503 / overloaded error." -ForegroundColor Yellow
+                    Write-Host "  The health check passed but the model may be rate-limited at runtime." -ForegroundColor Yellow
+                    Write-Host "  Run 'cc' to auto-assign a different model, or switch to another model with:" -ForegroundColor Yellow
+                    Write-Host "    cc <model-name>" -ForegroundColor White
+                    Write-Host "  List models: cc-status" -ForegroundColor White
+                    Write-Host ""
+                }
+            } else {
+                Write-Host $_
+            }
+        }
+    } catch {
+        Write-Host "Error launching Claude Code: $_" -ForegroundColor Red
+    }
 }
 
 # PSScriptAnalyzer ignore: PSUseApprovedVerbs
@@ -569,10 +637,10 @@ function global:cc-run {
         Write-Host "[cc-run] Direct model: $model" -ForegroundColor Cyan
     }
 
-    # Health check: use cache if fresh (< 60s), otherwise re-ping
-    # If unhealthy, search for a fallback within the same vendor category first
-    $cached = Get-CachedHealth -ModelName $model
-    $isHealthy = if ($null -ne $cached) { $cached } else { Test-ModelHealth -ModelName $model -Timeout 10 }
+    # Health check: ALWAYS do a fresh probe (bypass cache — model may be rate-limited since last check)
+    # Cache was set during auto-assign which could be minutes/hours ago
+    $script:CC_HEALTH_CACHE.Remove($model)
+    $isHealthy = Test-ModelHealth -ModelName $model -Timeout 10
 
     if (-not $isHealthy) {
         Write-Host "[cc-run] Model '$model' is not responding. Searching for healthy fallback..." -ForegroundColor Yellow
@@ -583,12 +651,14 @@ function global:cc-run {
             (Get-ModelCategory -ModelName $_) -eq $cat -and $_ -ne $model
         })
         foreach ($m in $sameCatModels) {
+            $script:CC_HEALTH_CACHE.Remove($m)
             if (Test-ModelHealth -ModelName $m -Timeout 10) { $fallback = $m; break }
         }
         # If no same-category model works, try any available model
         if (-not $fallback) {
             foreach ($m in $json.availableModels) {
                 if ($m -eq $model) { continue }
+                $script:CC_HEALTH_CACHE.Remove($m)
                 if (Test-ModelHealth -ModelName $m -Timeout 5) { $fallback = $m; break }
             }
         }
@@ -889,8 +959,12 @@ function global:cc-test {
         return
     }
 
-    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else { $json.env.ANTHROPIC_BASE_URL }
-    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else { $json.env.ANTHROPIC_API_KEY }
+    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL -replace '/+$', '' } else { $json.env.ANTHROPIC_BASE_URL }
+    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
+        if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN } else {
+            if ($json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else { $json.env.ANTHROPIC_AUTH_TOKEN }
+        }
+    }
 
     if (-not $baseUrl -or -not $apiKey) {
         Write-Host "Error: ANTHROPIC_BASE_URL or API key not configured." -ForegroundColor Red
@@ -899,7 +973,6 @@ function global:cc-test {
 
     $headers = @{
         "Content-Type" = "application/json"
-        "x-api-key" = $apiKey
         "anthropic-version" = "2023-06-01"
     }
     # For CPA endpoints, use Bearer auth

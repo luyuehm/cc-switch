@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-### Core Script (`cc-switch.ps1`) — ~1390 lines
+### Core Script (`cc-switch.ps1`) — ~1516 lines
 
 Single PowerShell file. All functions are `global:` scope for availability after dot-sourcing. No build step.
 
@@ -24,34 +24,49 @@ Single PowerShell file. All functions are `global:` scope for availability after
 
 **Health cache:**
 - `$script:CC_HEALTH_CACHE` — in-memory cache with 60s TTL, avoids redundant API pings
-- `Test-ModelHealth` — checks cache first, then pings API, caches result
+- `Test-ModelHealth` — checks cache first, then pings API, caches result. Uses realistic payload (system prompt + user message). Detects hidden error bodies (some proxies return 200 with error in body)
 - `Select-HealthyModel` — sequential testing with early exit (tests in priority order, stops at first healthy). Uses cache to skip previously-failed models. **Greatly reduces API calls compared to old parallel-all approach.**
 - `Clear-StaleHealthCache` — purges expired entries before a fresh auto-assign
 
-**Final verification (v2.2.1):**
-- After all 5 task groups are assigned, each model is re-pinged
-- If a model is stale/rate-limited, on-demand fallback probes next candidate
-- Cache freshness check (20s threshold) avoids redundant re-pings
+**Final verification (v2.3.0):**
+- After all 5 task groups are assigned, **each model is always re-pinged** (no freshness shortcut)
+- Cache is bypassed (`$script:CC_HEALTH_CACHE.Remove($model)`) before each re-probe
+- If a model becomes unhealthy during verification, on-demand fallback probes next candidate (also bypasses cache)
+- Phase 3: **Hard guard** — if all 5 tasks lose their model, abort without saving settings.json
 - **Guarantees all assigned models are healthy before saving to settings.json**
 
 **CPA auto-discovery:**
 - `Get-CPAModelList` — fetches model list from CPA endpoint, shared by `cc`, `cc-sync`, and `Invoke-CCAutoAssign`
-- `Invoke-CCAutoAssign` — **two-phase health verification**:
+- `Invoke-CCAutoAssign` — **two-phase health verification with hard guard**:
   - Phase 1: Sequential per-group probing with shared cache (~12 unique probes)
-  - Phase 2: Re-ping each assigned model; on-demand category-prioritized fallback if stale
+  - Phase 2: Re-ping each assigned model (bypass cache); on-demand category-prioritized fallback if stale
+  - Phase 3: Abort if zero models survive verification
   - Limited "anything" fallback to first 20 models (avoids 150+ probes)
-  - ~12 probes total, all 5 task models guaranteed healthy before saving
+  - ~17 probes total, all assigned models guaranteed healthy before saving
+
+**Auth priority (v2.3.0):**
+- API key resolution follows: `ANTHROPIC_AUTH_TOKEN` (process env) > `ANTHROPIC_API_KEY` (process env) > `settings.json.env.ANTHROPIC_AUTH_TOKEN` > `settings.json.env.ANTHROPIC_API_KEY`
+- Before launching `claude.exe`, `ANTHROPIC_API_KEY` is cleared (`$null`) to avoid the "Both values set" warning
+- `Resolve-CPAEndpoint` also supports both keys (parity with shell version)
+
+**Runtime 503 detection (v2.3.0):**
+- `cc` captures stderr from `claude.exe --bare` via `2>&1`
+- On 503 / overloaded / unavailable / capacity / too many requests, shows a helpful message suggesting `cc` (auto-assign) or `cc <model>` (switch)
+
+**Hidden error body detection (v2.3.0):**
+- `Test-ModelHealth` inspects the response body for `"error"`, `"overloaded"`, `"unavailable"` strings
+- Catches proxies that return HTTP 200 with an error JSON body
 
 **Command functions (all callable after dot-sourcing):**
 
 | Function | Purpose |
 |----------|---------|
-| `cc <model>` | Atomic model switch (updates 10+ fields: all `ANTHROPIC_DEFAULT_*`, `fallbackModel`, `model`), then launches `claude.exe --bare` |
+| `cc <model>` | **Pre-switch health check** → atomic model switch (updates 10+ fields), then launches `claude.exe --bare` with stderr capture for 503 detection |
 | `cc` (no args) | **Auto-discovers CPA models**, assigns best model per task, saves to `settings.json → taskModels`, then shows `Show-CCMenu` |
-| `cc-run <task>` | Task-smart launch from `settings.json.taskModels`: `code`, `quick`, `reason`, `image`, `default`. Falls back to heuristic from `availableModels` if no assignment exists. Can also pass a raw model name |
+| `cc-run <task>` | Task-smart launch from `settings.json.taskModels`. **Always bypasses health cache** for fresh probe. Falls back by same-category then any-category (also bypasses cache) |
 | `cc-config [-Reset]` | View current `taskModels` assignment. `-Reset` re-runs CPA auto-discovery. `cc-config <task> <model>` overrides a specific task |
 | `cc-sync [-List] [-Force] [-Remove] [-Reassign]` | Fetch models from CPA endpoint, diff with local `availableModels`, prompt to add/remove. `-Reassign` re-runs auto-assignment after sync |
-| `cc-test [-RemoveDead] [-Timeout N] [-Parallel N]` | Parallel health test pinging each model with `Invoke-RestMethod -Parallel`, classifies as healthy/quota/failed |
+| `cc-test [-RemoveDead] [-Timeout N] [-Parallel N]` | Parallel health test pinging each model with `Invoke-RestMethod -Parallel`, classifies as healthy/quota/failed. Uses Bearer auth (removed legacy `x-api-key` header) |
 | `cc-audit` | Full report: custom commands (markdown files in `~/.claude/commands/`), hidden skills in `skillOverrides`, enabled plugin packages |
 | `cc-hide <name>` / `cc-show <name>` | Set `skillOverrides.<name> = "off"` or remove entry. Supports plugin wildcard (`document-skills:*`) |
 | `cc-profile default\|minimal\|dev` | Bulk set `skillOverrides` to preset configurations |
@@ -60,7 +75,7 @@ Single PowerShell file. All functions are `global:` scope for availability after
 | `cc-pro` / `cc-fast` / `cc-default` | Shortcuts: claude-opus-4-7 / deepseek-v4-flash / gpt-5.5 |
 | `Get-CCModel` | Returns current model name from settings.json |
 
-**Model switching atomicity** — all 10+ fields updated in a single `Save-CCSettings` call. Claude Code launched with `--bare` flag for OAuth bypass. API key resolved from process env (loaded from `.env`) then falls back to `settings.json` values.
+**Model switching atomicity** — all 10+ fields updated in a single `Save-CCSettings` call. Claude Code launched with `--bare` flag for OAuth bypass. API key resolved from process env (loaded from `.env`) then falls back to `settings.json` values, with `ANTHROPIC_AUTH_TOKEN` priority.
 
 **Model inventory UI** — models are grouped by vendor prefix regex (gpt/o\d → GPT, claude/sonnet/haiku → Claude, deepseek → DeepSeek, qwen → Qwen, grok → Grok, kimi/moonshot → Moonshot, llama → Llama, mistral → Mistral, gemin → Gemini, step → Stepfun). The same grouping is used in `cc-status` and `cc-sync` display.
 
@@ -101,8 +116,10 @@ Skills managed via `settings.json` fields:
 
 ```
 cc-switch/
-├── cc-switch.ps1              # Core: model switch + menu + theme + skill management (941 lines)
-├── install.ps1                # 5-step installer
+├── cc-switch.ps1              # Core: model switch + health check + auto-discovery + menu (1516 lines)
+├── cc-switch.sh               # macOS/zsh version: model switch + CPA sync + skill mgmt (854 lines)
+├── install.ps1                # 5-step installer (Windows)
+├── install.sh                 # macOS installer (bash)
 ├── profile-backup.ps1         # Optional pwsh utilities: network, git, system, aliases
 ├── .env.example               # Secret template (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CPA_MODELS_URL)
 ├── .gitignore                 # Excludes .env files
