@@ -294,7 +294,13 @@ for cat in sorted(groups):
 
 # ─── CPA Auto Discovery & Task Assignment ───
 # Two-phase health verification: sequential probing + final re-ping
+# Shows real-time progress: [1/5] code · model → healthy
 __cc_auto_assign() {
+  local start_time
+  start_time="$(date +%s)"
+
+  # Step 0: Fetch model list (with progress)
+  echo -n "  Fetching CPA models..." >&2
   local cpa_models
   cpa_models="$(__cc_fetch_cpa_models 2>/dev/null)" || true
 
@@ -307,9 +313,12 @@ d=json.load(sys.stdin)
 for m in sorted(d.get('availableModels',[]) or []):
     print(m)
 ")"
+    echo " (local, $(( $(echo "$cpa_models" | wc -l | tr -d ' ') )) models)" >&2
+  else
+    echo " ($(( $(echo "$cpa_models" | wc -l | tr -d ' ') )) models)" >&2
   fi
 
-  [[ -z "$cpa_models" ]] && { echo "[!] No models available from CPA or local list." >&2; return 1; }
+  [[ -z "$cpa_models" ]] && { echo "[!] No models available." >&2; return 1; }
 
   # Clear stale cache entries
   local now
@@ -324,7 +333,7 @@ for m in sorted(d.get('availableModels',[]) or []):
   local categorized
   categorized="$(echo "$cpa_models" | __cc_categorize_models_py)"
 
-  # Build category arrays (filter out "free" models for paid preference)
+  # Build category arrays
   local claude_models=() gpt_models=() ds_models=() qwen_models=() grok_models=() image_models=() all_models=()
   local claude_paid=() gpt_paid=() ds_paid=() qwen_paid=()
 
@@ -340,21 +349,45 @@ for m in sorted(d.get('availableModels',[]) or []):
     [[ "$model" == *image* ]] && image_models+=("$model")
   done <<< "$categorized"
 
-  # Limit "anything" fallback to first 20 models
   local all_fallback=("${all_models[@]:0:20}")
 
-  # Use paid versions; fall back to all if paid list is empty
   [[ ${#claude_paid[@]} -eq 0 ]] && claude_paid=("${claude_models[@]}")
   [[ ${#gpt_paid[@]} -eq 0 ]]    && gpt_paid=("${gpt_models[@]}")
   [[ ${#ds_paid[@]} -eq 0 ]]     && ds_paid=("${ds_models[@]}")
   [[ ${#qwen_paid[@]} -eq 0 ]]   && qwen_paid=("${qwen_models[@]}")
 
-  echo -n "  Probing model health" >&2
-
   local -A assign
   local selected
 
-  # Phase 1: Sequential per-group probing
+  # ── Helper: probe candidates and return first healthy, with progress ──
+  __cc_probe_group() {
+    local label="$1" candidates=("${@:2}")
+    echo -n "  [$label]" >&2
+    for candidate in "${candidates[@]}"; do
+      [[ -z "$candidate" ]] && continue
+      local cached="${__cc_health_cache[$candidate]:-}"
+      if [[ -n "$cached" ]]; then
+        local cache_val="${cached##*:}"
+        if [[ "$cache_val" == "healthy" ]]; then
+          echo " $candidate (cached)" >&2
+          echo "$candidate"
+          return 0
+        fi
+        continue
+      fi
+      echo -n " $candidate?" >&2
+      if __cc_test_model_health "$candidate" 5; then
+        echo " ✓" >&2
+        echo "$candidate"
+        return 0
+      fi
+      echo -n "✗" >&2
+    done
+    echo " (none)" >&2
+    return 1
+  }
+
+  # Phase 1: Sequential per-group probing with real-time model names
   # code: Claude (non-haiku) → Claude → GPT → Qwen → anything
   local code_candidates=()
   for m in "${claude_paid[@]}"; do [[ "$m" != *haiku* ]] && code_candidates+=("$m"); done
@@ -362,7 +395,7 @@ for m in sorted(d.get('availableModels',[]) or []):
   code_candidates+=("${gpt_paid[@]}")
   code_candidates+=("${qwen_paid[@]}")
   code_candidates+=("${all_fallback[@]}")
-  selected="$(__cc_select_healthy_model "${code_candidates[@]}")" && assign[code]="$selected"
+  selected="$(__cc_probe_group "1/5 code  " "${code_candidates[@]}")" && assign[code]="$selected"
 
   # reason: GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything
   local reason_candidates=()
@@ -373,7 +406,7 @@ for m in sorted(d.get('availableModels',[]) or []):
   for m in "${claude_paid[@]}"; do echo "$m" | grep -q "thinking" && reason_candidates+=("$m"); done
   reason_candidates+=("${claude_paid[@]}")
   reason_candidates+=("${all_fallback[@]}")
-  selected="$(__cc_select_healthy_model "${reason_candidates[@]}")" && assign[reason]="$selected"
+  selected="$(__cc_probe_group "2/5 reason" "${reason_candidates[@]}")" && assign[reason]="$selected"
 
   # quick: DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything
   local quick_candidates=()
@@ -385,7 +418,7 @@ for m in sorted(d.get('availableModels',[]) or []):
   quick_candidates+=("${qwen_paid[@]}")
   quick_candidates+=("${grok_models[@]}")
   quick_candidates+=("${all_fallback[@]}")
-  selected="$(__cc_select_healthy_model "${quick_candidates[@]}")" && assign[quick]="$selected"
+  selected="$(__cc_probe_group "3/5 quick " "${quick_candidates[@]}")" && assign[quick]="$selected"
 
   # image: image-specific → GPT → Grok image → anything
   local image_candidates=()
@@ -393,7 +426,7 @@ for m in sorted(d.get('availableModels',[]) or []):
   image_candidates+=("${gpt_paid[@]}")
   for m in "${grok_models[@]}"; do echo "$m" | grep -q "image" && image_candidates+=("$m"); done
   image_candidates+=("${all_fallback[@]}")
-  selected="$(__cc_select_healthy_model "${image_candidates[@]}")" && assign[image]="$selected"
+  selected="$(__cc_probe_group "4/5 image " "${image_candidates[@]}")" && assign[image]="$selected"
 
   # default: GPT → DeepSeek → Claude → Qwen → anything
   local default_candidates=()
@@ -402,19 +435,20 @@ for m in sorted(d.get('availableModels',[]) or []):
   default_candidates+=("${claude_paid[@]}")
   default_candidates+=("${qwen_paid[@]}")
   default_candidates+=("${all_fallback[@]}")
-  selected="$(__cc_select_healthy_model "${default_candidates[@]}")" && assign[default]="$selected"
+  selected="$(__cc_probe_group "5/5 deflt " "${default_candidates[@]}")" && assign[default]="$selected"
 
-  # Phase 2: Final verification — re-ping each assigned model (bypass cache)
+  # Phase 2: Final verification — re-ping (10s timeout, only 5 calls)
+  echo -n "  Verifying:" >&2
   local task
   for task in code reason quick image default; do
     local model="${assign[$task]:-}"
     [[ -z "$model" ]] && continue
-    echo -n "!" >&2
     unset "__cc_health_cache[$model]"
-    if ! __cc_test_model_health "$model" 10; then
+    if __cc_test_model_health "$model" 10; then
+      echo -n " $model ✓" >&2
+    else
       echo "" >&2
       echo "  [FALLBACK]  $model unhealthy for '$task', searching..." >&2
-      # Build fallback candidates for this task
       local fallback_candidates=()
       case "$task" in
         code)    fallback_candidates=("${code_candidates[@]}") ;;
@@ -426,11 +460,13 @@ for m in sorted(d.get('availableModels',[]) or []):
       local new_selected=""
       for m in "${fallback_candidates[@]}"; do
         [[ "$m" == "$model" ]] && continue
-        echo -n "." >&2
+        echo -n " $m?" >&2
         if __cc_test_model_health "$m" 10; then
           new_selected="$m"
+          echo -n " ✓" >&2
           break
         fi
+        echo -n "✗" >&2
       done
       if [[ -n "$new_selected" ]]; then
         echo "    → $new_selected" >&2
@@ -441,27 +477,23 @@ for m in sorted(d.get('availableModels',[]) or []):
       fi
     fi
   done
+  echo "" >&2
 
-  echo " [done]" >&2
-
-  # Phase 3: Hard guard — abort if all tasks lost
+  # Phase 3: Hard guard
   if [[ ${#assign[@]} -eq 0 ]]; then
     echo "[!] No healthy models found at all. Settings NOT saved." >&2
-    echo "  Check your CPA proxy or API key: ~/.claude/cc-switch.env" >&2
-    echo "  Then run 'cc' again." >&2
     return 1
   fi
 
-  local total="${#assign[@]}"
+  local elapsed=$(( $(date +%s) - start_time ))
   local total_str=""
-  (( total < 5 )) && total_str=" ($total/5 tasks assigned)"
-  echo "  All $total assigned models verified healthy$total_str" >&2
+  (( ${#assign[@]} < 5 )) && total_str=" (${#assign[@]}/5 tasks assigned)"
+  echo "  All ${#assign[@]} assigned models verified healthy${total_str} (${elapsed}s)" >&2
 
   # Save to settings.json
   local json
   json="$(__cc_read_settings)" || return 1
 
-  # Build taskModels JSON
   local tm_json="{"
   local first=1
   for task in code reason quick image default; do
@@ -474,7 +506,6 @@ for m in sorted(d.get('availableModels',[]) or []):
   done
   tm_json+="}"
 
-  # Update availableModels with CPA list and save taskModels
   json="$(echo "$json" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -486,7 +517,6 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
   echo "$json" | __cc_save_settings
 
-  # Return assignments for display
   for task in code reason quick image default; do
     [[ -n "${assign[$task]:-}" ]] && echo "${task}|${assign[$task]}"
   done
@@ -685,10 +715,8 @@ print(d['taskModels']['$task'])
   fi
 
   if [[ -z "$model" ]]; then
-    # No taskModels configured — run auto-assign first.
-    # Progress dots go to stderr in real-time. stdout (assignments) is discarded
-    # but saved to settings.json by __cc_auto_assign itself.
-    echo "[cc-run] No taskModels configured. Probing models (dots = one probe):"
+    # No taskModels configured — run auto-assign (shows its own progress to stderr)
+    echo "[cc-run] No taskModels — auto-discovering models:"
     __cc_auto_assign >/dev/null || true
     json="$(__cc_read_settings)" || return 1
     model="$(echo "$json" | python3 -c "
