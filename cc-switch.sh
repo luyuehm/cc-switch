@@ -153,13 +153,16 @@ __cc_test_model_health() {
   local now
   now="$(date +%s)"
 
-  # Check cache
+  # Check cache (defensive: skip if format is corrupt)
   local cached="${__cc_health_cache[$model]:-}"
-  if [[ -n "$cached" ]]; then
+  if [[ -n "$cached" && "$cached" == *:* ]]; then
     local cache_ts="${cached%%:*}"
     local cache_val="${cached##*:}"
-    if (( now - cache_ts < CC_HEALTH_CACHE_TTL )); then
-      [[ "$cache_val" == "healthy" ]] && return 0 || return 1
+    # Defend against empty or non-numeric cache_ts
+    if [[ -n "$cache_ts" && "$cache_ts" =~ ^[0-9]+$ && -n "$cache_val" ]]; then
+      if (( now - cache_ts < CC_HEALTH_CACHE_TTL )); then
+        [[ "$cache_val" == "healthy" ]] && return 0 || return 1
+      fi
     fi
   fi
 
@@ -740,61 +743,113 @@ else:
   unset "__cc_health_cache[$model]"
   if ! __cc_test_model_health "$model" 10; then
     echo "[cc-run] Model '$model' is not responding. Searching for healthy fallback..."
-    # Try same-category models first
+
+    # Determine category with zsh-native matching (fast, no subshell per model)
     local cat
-    cat="$(echo "$model" | python3 -c "
-import sys
-m=sys.stdin.read().strip()
-if m.startswith('gpt-') or m.startswith('o'): print('GPT')
-elif m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): print('Claude')
-elif m.startswith('deepseek'): print('DeepSeek')
-elif m.startswith('qwen'): print('Qwen')
-elif m.startswith('grok'): print('Grok')
-else: print('Other')
-")"
-    local fallback=""
-    local models_list
-    models_list="$(echo "$json" | python3 -c "
+    case "$model" in
+      gpt-*)    cat="GPT" ;;
+      claude-*|sonnet*|haiku*) cat="Claude" ;;
+      deepseek*) cat="DeepSeek" ;;
+      qwen*)    cat="Qwen" ;;
+      grok*)    cat="Grok" ;;
+      *)        cat="Other" ;;
+    esac
+
+    local fallback="" _mcat
+    # Build sorted model list from JSON (single python3 call)
+    local models_str
+    models_str="$(echo "$json" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
 for m in sorted(d.get('availableModels',[]) or []):
     print(m)
 ")"
-    # Same category first
+
+    local same_cat_list="" other_list=""
     while IFS= read -r m; do
-      local mcat
-      mcat="$(echo "$m" | python3 -c "
-import sys
-m=sys.stdin.read().strip()
-if m.startswith('gpt-') or m.startswith('o'): print('GPT')
-elif m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): print('Claude')
-elif m.startswith('deepseek'): print('DeepSeek')
-elif m.startswith('qwen'): print('Qwen')
-elif m.startswith('grok'): print('Grok')
-else: print('Other')
-")"
-      [[ "$m" == "$model" ]] && continue
-      [[ "$mcat" != "$cat" ]] && continue
+      [[ -z "$m" || "$m" == "$model" ]] && continue
+      _mcat="Other"
+      case "$m" in
+        gpt-*)    _mcat="GPT" ;;
+        claude-*|sonnet*|haiku*) _mcat="Claude" ;;
+        deepseek*) _mcat="DeepSeek" ;;
+        qwen*)    _mcat="Qwen" ;;
+        grok*)    _mcat="Grok" ;;
+      esac
+      [[ "$_mcat" == "$cat" ]] && same_cat_list+="$m"$'\n' || other_list+="$m"$'\n'
+    done <<< "$models_str"
+
+    # Probe same-category first, then others
+    local full_list="${same_cat_list}${other_list}"
+    while IFS= read -r m; do
+      [[ -z "$m" ]] && continue
       unset "__cc_health_cache[$m]"
       if __cc_test_model_health "$m" 5; then fallback="$m"; break; fi
-    done <<< "$models_list"
-    # Any category
-    if [[ -z "$fallback" ]]; then
-      while IFS= read -r m; do
-        [[ "$m" == "$model" ]] && continue
-        unset "__cc_health_cache[$m]"
-        if __cc_test_model_health "$m" 5; then fallback="$m"; break; fi
-      done <<< "$models_list"
-    fi
+    done <<< "$full_list"
+
     if [[ -n "$fallback" ]]; then
       echo "[cc-run] Fallback to: $fallback"
       model="$fallback"
     else
-      echo "[cc-run] No healthy fallback found. Attempting launch anyway..."
+      echo "[cc-run] No healthy fallback found. Launching anyway..."
     fi
   fi
 
-  cc "$model"
+  # Launch Claude Code directly (skip cc()'s redundant health check)
+  echo "[cc-run] Launching Claude Code with model: $model"
+
+  local json2
+  json2="$(__cc_read_settings)" || return 1
+
+  # Atomic model switch
+  json2="$(echo "$json2" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+model='$model'
+for k in ['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME',
+          'ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL_NAME',
+          'ANTHROPIC_DEFAULT_OPUS_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL_NAME',
+          'ANTHROPIC_REASONING_MODEL']:
+    d['env'][k]=model
+d['fallbackModel']=[model]
+d['model']=model
+json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
+")"
+  echo "$json2" | __cc_save_settings
+
+  local claude_bin
+  claude_bin="$(__cc_find_claude)"
+  if [[ -z "$claude_bin" ]]; then
+    echo "Error: claude not found. Install with: npm install -g @anthropic-ai/claude-code" >&2
+    return 1
+  fi
+
+  CC_SWITCH_SKIP_ENV=0 __cc_load_env
+
+  local auth_key=""
+  if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
+    auth_key="$ANTHROPIC_AUTH_TOKEN"
+  elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+    auth_key="$ANTHROPIC_API_KEY"
+  else
+    auth_key="$(echo "$json2" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN','')")"
+    [[ -z "$auth_key" ]] && auth_key="$(echo "$json2" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
+  fi
+
+  if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
+    export ANTHROPIC_BASE_URL
+  else
+    local fallback_url
+    fallback_url="$(echo "$json2" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_BASE_URL','')")"
+    [[ -n "$fallback_url" ]] && export ANTHROPIC_BASE_URL="$fallback_url"
+  fi
+
+  if [[ -n "$auth_key" ]]; then
+    unset ANTHROPIC_API_KEY
+    export ANTHROPIC_AUTH_TOKEN="$auth_key"
+  fi
+
+  eval "$claude_bin"
 }
 
 # === SHORTCUTS (task-model aware) ===
