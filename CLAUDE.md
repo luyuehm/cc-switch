@@ -12,6 +12,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Single PowerShell file. All functions are `global:` scope for availability after dot-sourcing. No build step.
 
+### Core Script (`cc-switch.sh`) — ~1650 lines
+
+Single bash/zsh file for macOS. Feature parity with PowerShell version: health checks, CPA auto-discovery, cc-run, cc-config, cc-test. Uses curl for API calls, python3 for JSON manipulation, and in-memory associative arrays for health cache (zsh).
+
+**Startup chain:**
+1. `__cc_load_env` — reads `~/.claude/cc-switch.env` into process env vars at import time
+2. `__cc_read_settings` / `__cc_save_settings` — read/write `~/.claude/settings.json` (python3)
+3. `__cc_find_claude` — searches known paths, validates `--version | grep "Claude Code"`, falls back to npx
+
+**Endpoint resolution (`__cc_resolve_endpoint`):**
+- Priority: shell `ANTHROPIC_BASE_URL` → `CPA_MODELS_URL` → `~/.openclaw/.env` (`CLAUDE_CODE_BASE_URL`) → `settings.json`
+- Auth: shell `ANTHROPIC_AUTH_TOKEN` → `ANTHROPIC_API_KEY` → `~/.openclaw/.env` (`CPA_API_KEY`) → `settings.json`
+
+**Health check (`__cc_test_model_health`):**
+- In-memory cache with 60s TTL using zsh associative array
+- ping via `curl POST /v1/messages` with realistic payload
+- Detects hidden error bodies (proxies returning 200 with error JSON)
+- Returns 0 (healthy) or 1 (unhealthy)
+
+**Auto-assign (`__cc_auto_assign`):**
+- Three-phase: sequential probing → final verification (re-ping) → hard guard (abort if empty)
+- Same model priority chains as PowerShell version (code/reason/quick/image/default)
+- Reads from `~/.openclaw/.env` as fallback for CPA endpoint config
+
 **Startup chain:**
 1. `Load-CCEnv` — reads `~/.claude/cc-switch.env` into process env vars at import time
 2. `Get-CCSettings` / `Save-CCSettings` — read/write `~/.claude/settings.json` (ConvertFrom-Json, depth 10)
@@ -59,21 +83,28 @@ Single PowerShell file. All functions are `global:` scope for availability after
 
 **Command functions (all callable after dot-sourcing):**
 
-| Function | Purpose |
-|----------|---------|
-| `cc <model>` | **Pre-switch health check** → atomic model switch (updates 10+ fields), then launches `claude.exe --bare` with stderr capture for 503 detection |
-| `cc` (no args) | **Auto-discovers CPA models**, assigns best model per task, saves to `settings.json → taskModels`, then shows `Show-CCMenu` |
-| `cc-run <task>` | Task-smart launch from `settings.json.taskModels`. **Always bypasses health cache** for fresh probe. Falls back by same-category then any-category (also bypasses cache) |
-| `cc-config [-Reset]` | View current `taskModels` assignment. `-Reset` re-runs CPA auto-discovery. `cc-config <task> <model>` overrides a specific task |
-| `cc-sync [-List] [-Force] [-Remove] [-Reassign]` | Fetch models from CPA endpoint, diff with local `availableModels`, prompt to add/remove. `-Reassign` re-runs auto-assignment after sync |
-| `cc-test [-RemoveDead] [-Timeout N] [-Parallel N]` | Parallel health test pinging each model with `Invoke-RestMethod -Parallel`, classifies as healthy/quota/failed. Uses Bearer auth (removed legacy `x-api-key` header) |
-| `cc-audit` | Full report: custom commands (markdown files in `~/.claude/commands/`), hidden skills in `skillOverrides`, enabled plugin packages |
-| `cc-hide <name>` / `cc-show <name>` | Set `skillOverrides.<name> = "off"` or remove entry. Supports plugin wildcard (`document-skills:*`) |
-| `cc-profile default\|minimal\|dev` | Bulk set `skillOverrides` to preset configurations |
-| `cc-commands list\|create\|remove` | Manage custom slash commands (markdown frontmatter in `~/.claude/commands/`) |
-| `cc-theme <name>` | List or switch Oh My Posh themes (100+ `.omp.json` files). Live preview via `oh-my-posh init pwsh --config` |
-| `cc-pro` / `cc-fast` / `cc-default` | Shortcuts: claude-opus-4-7 / deepseek-v4-flash / gpt-5.5 |
-| `Get-CCModel` | Returns current model name from settings.json |
+| Function | PowerShell | macOS (zsh) | Purpose |
+|----------|-----------|-------------|---------|
+| `cc <model>` | ✅ | ✅ | **Pre-switch health check** → atomic model switch, then launches Claude Code |
+| `cc` (no args) | ✅ | ✅ | **Auto-discovers CPA models**, assigns best model per task, saves to `settings.json → taskModels` |
+| `cc-run <task>` | ✅ | ✅ | Task-smart launch from `settings.json.taskModels`. Always bypasses health cache for fresh probe |
+| `cc-config` | ✅ | ✅ | View current `taskModels` assignment. `-Reset` re-runs CPA auto-discovery |
+| `cc-sync` | ✅ | ✅ | Fetch models from CPA endpoint, diff with local |
+| `cc-test` | ✅ | ✅ | Test all models for health (curl-based on macOS, Invoke-RestMethod on Windows) |
+| `cc-status` | ✅ | ✅ | Full model inventory with task assignments |
+| `cc-audit` | ✅ | ✅ | Full report: custom commands, hidden skills, plugins |
+| `cc-hide/cc-show` | ✅ | ✅ | Set `skillOverrides` entries |
+| `cc-profile` | ✅ | ✅ | Bulk set `skillOverrides` to preset configurations |
+| `cc-commands` | ✅ | ✅ | Manage custom slash commands |
+| `cc-theme` | ✅ | ✅ | List or switch Oh My Posh themes |
+| `cc-pro/cc-fast/cc-default` | ✅ | ✅ | Task-model-aware shortcuts |
+
+**macOS-specific implementation notes:**
+- Health cache: zsh associative array (`typeset -A __cc_health_cache`) with 60s TTL
+- API calls: `curl` with `--max-time` and Bearer auth
+- JSON: `python3` (stdlib `json`), tested on macOS Python 3.9+
+- Endpoint fallback: reads `~/.openclaw/.env` for `CLAUDE_CODE_BASE_URL` and `CPA_API_KEY` when shell env vars are absent
+- ccx integration: `install.sh` detects existing `ccx` and installs cc-switch alongside it; `cc()` in `.zshrc` can delegate to `ccx` after cc-switch's health check
 
 **Model switching atomicity** — all 10+ fields updated in a single `Save-CCSettings` call. Claude Code launched with `--bare` flag for OAuth bypass. API key resolved from process env (loaded from `.env`) then falls back to `settings.json` values, with `ANTHROPIC_AUTH_TOKEN` priority.
 
@@ -117,9 +148,9 @@ Skills managed via `settings.json` fields:
 ```
 cc-switch/
 ├── cc-switch.ps1              # Core: model switch + health check + auto-discovery + menu (1516 lines)
-├── cc-switch.sh               # macOS/zsh version: model switch + CPA sync + skill mgmt (854 lines)
+├── cc-switch.sh               # macOS/zsh version: model switch + health + CPA auto-discovery + cc-run (1650 lines)
 ├── install.ps1                # 5-step installer (Windows)
-├── install.sh                 # macOS installer (bash)
+├── install.sh                 # 6-step macOS installer (bash)
 ├── profile-backup.ps1         # Optional pwsh utilities: network, git, system, aliases
 ├── .env.example               # Secret template (ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL, CPA_MODELS_URL)
 ├── .gitignore                 # Excludes .env files
@@ -190,7 +221,9 @@ CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models   # optional
 
 - **Model names** in `cc <model>` must match entries in `availableModels` array exactly
 - **API key resolution**: process env (from `.env`) → `settings.json.env.ANTHROPIC_API_KEY`
+- **macOS endpoint resolution**: shell env → `~/.openclaw/.env` (`CLAUDE_CODE_BASE_URL`/`CPA_API_KEY`) → `cc-switch.env` → `settings.json`
 - **`cc-sync`** fetches from `CPA_MODELS_URL`, falls back to `ANTHROPIC_BASE_URL/v1/models`, authorizes with `ANTHROPIC_API_KEY`
-- **Oh My Posh** expects themes at `C:\tools\oh-my-posh\themes\*.omp.json`
-- **Python scripts** require Python 3 and are optional; core is all PowerShell
+- **Oh My Posh** expects themes at `C:\tools\oh-my-posh\themes\*.omp.json` (Windows) or homebrew path (macOS)
+- **Python scripts** require Python 3 and are optional; core is all PowerShell (Windows) or bash/zsh+curl+python3 (macOS)
 - **CPA Cleaner** runs on localhost:8317, set `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` to use
+- **macOS ccx coexistence**: if `ccx` is installed, cc-switch can coexist; update `.zshrc` to integrate health checks before `ccx` calls

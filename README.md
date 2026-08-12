@@ -28,6 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.sh |
 bash install.sh && source ~/.zshrc
 ```
 
+**New in v2.4.0:** Health checks, CPA auto-discovery (`cc` no args), `cc-run` task scheduling, `cc-config`, `cc-test` — now at parity with Windows/PowerShell version.
+
 ## 🪟 Windows / PowerShell (pwsh)
 
 *Recommended path for CPA auto-discovery and task scheduling.*
@@ -81,7 +83,7 @@ iwr -Uri https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | 
 .\install.ps1
 ```
 
-### Shell Commands (PowerShell)
+### Shell Commands (PowerShell / macOS)
 
 ```powershell
 cc                  # Auto-discover CPA models + assign tasks + show menu
@@ -91,12 +93,12 @@ cc-config           # View/override task-model assignments
 cc-pro              # Switch to code task model
 cc-fast             # Switch to quick task model
 cc-default          # Switch to default model
-cc-status           # Show current model + full list
+cc-status           # Show current model + full list with task assignments
 cc-sync             # Fetch CPA models, diff with local
 cc-sync --list      # Show full CPA model list only
 cc-sync --force     # Auto-add new CPA models
 cc-sync --remove    # Remove obsolete models
-cc-sync -Reassign   # Sync + reassign task models
+cc-sync --reassign  # Sync + reassign task models
 cc-test             # Test all models for quota/health
 cc-test -RemoveDead # Remove failed models
 cc-audit            # Full skill visibility report
@@ -108,6 +110,8 @@ cc-commands create  # Create a new slash command
 cc-commands remove  # Remove a slash command
 cc-theme            # List/switch Oh My Posh themes
 ```
+
+> **macOS parity:** All commands above work on both platforms. On macOS, `cc` (no args) runs CPA auto-discovery and saves `taskModels` to `settings.json`. `cc-run` launches with health-aware fallback. `cc-test` tests all models with curl-based health probes.
 
 ### Configure Secrets (Windows)
 
@@ -661,9 +665,9 @@ Path: `~/.claude/settings.json`
 
 ```
 cc-switch/
-├── cc-switch.sh               # Core functions: model switch + menu + theme (bash/zsh, 854 lines)
+├── cc-switch.sh               # Core: model switch + health check + auto-discovery + menu (bash/zsh, ~1650 lines)
 ├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~1516 lines)
-├── install.sh                 # macOS installer (bash)
+├── install.sh                 # macOS installer (bash, 6-step)
 ├── install.ps1                # Windows/pwsh 5-step installer
 ├── profile-backup.ps1         # Optional pwsh utilities
 ├── .env.example               # Secret template

@@ -1,14 +1,19 @@
 # cc-switch.sh — Claude Code Model Switcher for macOS (zsh/bash)
 # Source: . ./cc-switch.sh   or add to ~/.zshrc
 # https://github.com/luyuehm/cc-switch
+# v2.4.0 — Health check, CPA auto-discovery, cc-run, cc-config, cc-test
 
 CC_SETTINGS_PATH="$HOME/.claude/settings.json"
 CC_ENV_PATH="$HOME/.claude/cc-switch.env"
 
+# ─── In-memory health cache (TTL: 60s) ───
+# Format: __cc_health_cache[model]="<epoch_timestamp>:<healthy|unhealthy>"
+typeset -A __cc_health_cache 2>/dev/null || true
+typeset -i CC_HEALTH_CACHE_TTL=60
+
 __cc_load_env() {
   [[ -f "$CC_ENV_PATH" ]] || return
   # Skip auto-export if CC_SWITCH_SKIP_ENV is set (prevents "Both claude.ai and API_KEY" conflict)
-  # See README.md#claudeai-conflict for details.
   [[ "${CC_SWITCH_SKIP_ENV:-0}" == "1" ]] && return
   while IFS='=' read -r key val; do
     key="${key#"${key%%[![:space:]]*}"}"
@@ -79,6 +84,415 @@ __cc_get_current_model() {
   echo "$json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('env',{}).get('ANTHROPIC_MODEL','(unknown)'))"
 }
 
+# ─── CPA Endpoint Resolution ───
+# Priority: shell ANTHROPIC_BASE_URL > file CPA_MODELS_URL > ~/.openclaw/.env > settings.json
+# Auth: shell ANTHROPIC_AUTH_TOKEN > shell ANTHROPIC_API_KEY > file CPA_API_KEY > ~/.openclaw/.env > settings.json
+__cc_resolve_endpoint() {
+  local shell_url="${ANTHROPIC_BASE_URL:-}"
+  local shell_token="${ANTHROPIC_AUTH_TOKEN:-}"
+  local shell_key="${ANTHROPIC_API_KEY:-}"
+
+  local cpa_url=""
+  local api_key=""
+
+  # URL resolution
+  if [[ -n "$shell_url" ]]; then
+    cpa_url="${shell_url%/}/v1/models"
+  elif [[ -n "${CPA_MODELS_URL:-}" ]]; then
+    cpa_url="$CPA_MODELS_URL"
+  else
+    # Fallback: read from ~/.openclaw/.env (unified config)
+    local openclaw_url=""
+    [[ -f "$HOME/.openclaw/.env" ]] && openclaw_url="$(grep '^CLAUDE_CODE_BASE_URL=' "$HOME/.openclaw/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    [[ -n "$openclaw_url" ]] && cpa_url="${openclaw_url%/}/v1/models"
+  fi
+
+  # If still empty, try settings.json
+  if [[ -z "$cpa_url" ]]; then
+    local json
+    json="$(__cc_read_settings 2>/dev/null)" || true
+    if [[ -n "$json" ]]; then
+      local base_url
+      base_url="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_BASE_URL','')")"
+      [[ -n "$base_url" ]] && cpa_url="${base_url%/}/v1/models"
+    fi
+  fi
+
+  # API key resolution
+  if [[ -n "$shell_token" ]]; then
+    api_key="$shell_token"
+  elif [[ -n "$shell_key" ]]; then
+    api_key="$shell_key"
+  elif [[ -n "${CPA_API_KEY:-}" ]]; then
+    api_key="$CPA_API_KEY"
+  else
+    # Fallback: read from ~/.openclaw/.env
+    [[ -f "$HOME/.openclaw/.env" ]] && api_key="$(grep '^CPA_API_KEY=' "$HOME/.openclaw/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+  fi
+
+  # If still empty, try settings.json
+  if [[ -z "$api_key" ]]; then
+    local json
+    json="$(__cc_read_settings 2>/dev/null)" || true
+    if [[ -n "$json" ]]; then
+      api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN','')")"
+      [[ -z "$api_key" ]] && api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
+    fi
+  fi
+
+  echo "${cpa_url}|${api_key}"
+}
+
+# ─── Health Check ───
+# Ping a model via POST /v1/messages to verify it's responsive.
+# Uses in-memory cache with 60s TTL.
+# Returns 0 if healthy, 1 if unhealthy.
+__cc_test_model_health() {
+  local model="$1"
+  local timeout_sec="${2:-10}"
+  local now
+  now="$(date +%s)"
+
+  # Check cache
+  local cached="${__cc_health_cache[$model]:-}"
+  if [[ -n "$cached" ]]; then
+    local cache_ts="${cached%%:*}"
+    local cache_val="${cached##*:}"
+    if (( now - cache_ts < CC_HEALTH_CACHE_TTL )); then
+      [[ "$cache_val" == "healthy" ]] && return 0 || return 1
+    fi
+  fi
+
+  # Resolve endpoint
+  local ep_raw
+  ep_raw="$(__cc_resolve_endpoint)"
+  local api_key="${ep_raw##*|}"
+  local cpa_url="${ep_raw%|*}"
+  local base_url
+  base_url="${ANTHROPIC_BASE_URL:-}"
+  [[ -z "$base_url" ]] && base_url="${cpa_url%/v1/models}"
+
+  if [[ -z "$base_url" || -z "$api_key" ]]; then
+    __cc_health_cache[$model]="$now:unhealthy"
+    return 1
+  fi
+
+  local messages_url="${base_url%/}/v1/messages"
+
+  # Use realistic payload to exercise the pipeline
+  local body
+  body=$(cat <<EOF
+{"model":"$model","system":"You are a helpful assistant.","messages":[{"role":"user","content":"ping"}],"max_tokens":5}
+EOF
+)
+
+  local response
+  response="$(curl -s --connect-timeout 5 --max-time "$timeout_sec" \
+    -X POST "$messages_url" \
+    -H "Authorization: Bearer $api_key" \
+    -H "Content-Type: application/json" \
+    -H "anthropic-version: 2023-06-01" \
+    -d "$body" 2>/dev/null)" || {
+    __cc_health_cache[$model]="$now:unhealthy"
+    return 1
+  }
+
+  # Check for hidden error body (some proxies return 200 with error JSON)
+  if echo "$response" | grep -qiE '"error"|"overloaded"|"unavailable"'; then
+    __cc_health_cache[$model]="$now:unhealthy"
+    return 1
+  fi
+
+  __cc_health_cache[$model]="$now:healthy"
+  return 0
+}
+
+# Test candidates in priority order, return first healthy model (sequential early-exit)
+__cc_select_healthy_model() {
+  local candidates=("$@")
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    [[ -z "$candidate" ]] && continue
+    local cached="${__cc_health_cache[$candidate]:-}"
+    if [[ -n "$cached" ]]; then
+      local cache_val="${cached##*:}"
+      if [[ "$cache_val" == "healthy" ]]; then
+        echo "$candidate"
+        return 0
+      fi
+      continue  # known unhealthy, skip
+    fi
+    echo -n "." >&2
+    if __cc_test_model_health "$candidate" 10; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# ─── CPA Model Fetch ───
+__cc_fetch_cpa_models() {
+  local ep_raw
+  ep_raw="$(__cc_resolve_endpoint)"
+  local api_key="${ep_raw##*|}"
+  local cpa_url="${ep_raw%|*}"
+
+  [[ -z "$cpa_url" || -z "$api_key" ]] && return 1
+
+  local response
+  response="$(curl -s --connect-timeout 5 --max-time 15 "$cpa_url" \
+    -H "Authorization: Bearer $api_key" \
+    -H "Content-Type: application/json")" || return 1
+
+  echo "$response" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    if isinstance(d, dict) and 'data' in d:
+        models=[m['id'] for m in d['data'] if m.get('id')]
+    elif isinstance(d, list):
+        models=[m.get('id','') for m in d if m.get('id')]
+    else:
+        models=[]
+    for m in sorted(models):
+        print(m)
+except Exception as e:
+    sys.exit(1)
+" 2>/dev/null
+}
+
+# ─── Model Categorization (Python helper, used by __cc_auto_assign and menu) ───
+__cc_categorize_models_py() {
+  python3 -c "
+import sys
+models = [l.strip() for l in sys.stdin if l.strip()]
+
+def get_cat(m):
+    if m.startswith('gpt-') or m.startswith('o'): return 'GPT'
+    if m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): return 'Claude'
+    if m.startswith('deepseek'): return 'DeepSeek'
+    if m.startswith('qwen'): return 'Qwen'
+    if m.startswith('grok'): return 'Grok'
+    if m.startswith('kimi') or m.startswith('moonshot'): return 'Moonshot'
+    if m.startswith('llama'): return 'Llama'
+    if m.startswith('mistral') or m.startswith('mixtral'): return 'Mistral'
+    if m.startswith('gemin'): return 'Gemini'
+    if 'step' in m.lower(): return 'Stepfun'
+    return 'Other'
+
+groups = {}
+for m in models:
+    cat = get_cat(m)
+    groups.setdefault(cat, []).append(m)
+
+for cat in sorted(groups):
+    for m in sorted(groups[cat]):
+        print(f'{cat}|{m}')
+"
+}
+
+# ─── CPA Auto Discovery & Task Assignment ───
+# Two-phase health verification: sequential probing + final re-ping
+__cc_auto_assign() {
+  local cpa_models
+  cpa_models="$(__cc_fetch_cpa_models 2>/dev/null)" || true
+
+  if [[ -z "$cpa_models" ]]; then
+    local json
+    json="$(__cc_read_settings)" || return 1
+    cpa_models="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for m in sorted(d.get('availableModels',[]) or []):
+    print(m)
+")"
+  fi
+
+  [[ -z "$cpa_models" ]] && { echo "[!] No models available from CPA or local list." >&2; return 1; }
+
+  # Clear stale cache entries
+  local now
+  now="$(date +%s)"
+  local cutoff=$(( now - CC_HEALTH_CACHE_TTL ))
+  for k in "${(@k)__cc_health_cache}"; do
+    local ts="${__cc_health_cache[$k]%%:*}"
+    (( ts < cutoff )) && unset "__cc_health_cache[$k]"
+  done
+
+  # Categorize models
+  local categorized
+  categorized="$(echo "$cpa_models" | __cc_categorize_models_py)"
+
+  # Build category arrays (filter out "free" models for paid preference)
+  local claude_models=() gpt_models=() ds_models=() qwen_models=() grok_models=() image_models=() all_models=()
+  local claude_paid=() gpt_paid=() ds_paid=() qwen_paid=()
+
+  while IFS='|' read -r cat model; do
+    all_models+=("$model")
+    case "$cat" in
+      Claude)  claude_models+=("$model"); [[ "$model" != *free* ]] && claude_paid+=("$model") ;;
+      GPT)     gpt_models+=("$model");    [[ "$model" != *free* ]] && gpt_paid+=("$model") ;;
+      DeepSeek) ds_models+=("$model");    [[ "$model" != *free* ]] && ds_paid+=("$model") ;;
+      Qwen)    qwen_models+=("$model");   [[ "$model" != *free* ]] && qwen_paid+=("$model") ;;
+      Grok)    grok_models+=("$model") ;;
+    esac
+    [[ "$model" == *image* ]] && image_models+=("$model")
+  done <<< "$categorized"
+
+  # Limit "anything" fallback to first 20 models
+  local all_fallback=("${all_models[@]:0:20}")
+
+  # Use paid versions; fall back to all if paid list is empty
+  [[ ${#claude_paid[@]} -eq 0 ]] && claude_paid=("${claude_models[@]}")
+  [[ ${#gpt_paid[@]} -eq 0 ]]    && gpt_paid=("${gpt_models[@]}")
+  [[ ${#ds_paid[@]} -eq 0 ]]     && ds_paid=("${ds_models[@]}")
+  [[ ${#qwen_paid[@]} -eq 0 ]]   && qwen_paid=("${qwen_models[@]}")
+
+  echo -n "  Probing model health" >&2
+
+  local -A assign
+  local selected
+
+  # Phase 1: Sequential per-group probing
+  # code: Claude (non-haiku) → Claude → GPT → Qwen → anything
+  local code_candidates=()
+  for m in "${claude_paid[@]}"; do [[ "$m" != *haiku* ]] && code_candidates+=("$m"); done
+  code_candidates+=("${claude_paid[@]}")
+  code_candidates+=("${gpt_paid[@]}")
+  code_candidates+=("${qwen_paid[@]}")
+  code_candidates+=("${all_fallback[@]}")
+  selected="$(__cc_select_healthy_model "${code_candidates[@]}")" && assign[code]="$selected"
+
+  # reason: GPT sol/reasoning → GPT → Qwen Plus/Max → Claude thinking → Claude → anything
+  local reason_candidates=()
+  for m in "${gpt_paid[@]}"; do echo "$m" | grep -qE "sol|reason|preview|thinking" && reason_candidates+=("$m"); done
+  reason_candidates+=("${gpt_paid[@]}")
+  for m in "${qwen_paid[@]}"; do echo "$m" | grep -qE "plus|max|preview" && reason_candidates+=("$m"); done
+  reason_candidates+=("${qwen_paid[@]}")
+  for m in "${claude_paid[@]}"; do echo "$m" | grep -q "thinking" && reason_candidates+=("$m"); done
+  reason_candidates+=("${claude_paid[@]}")
+  reason_candidates+=("${all_fallback[@]}")
+  selected="$(__cc_select_healthy_model "${reason_candidates[@]}")" && assign[reason]="$selected"
+
+  # quick: DeepSeek flash → DeepSeek → GPT mini/flash → Qwen flash → Grok → anything
+  local quick_candidates=()
+  for m in "${ds_paid[@]}"; do echo "$m" | grep -q "flash" && quick_candidates+=("$m"); done
+  quick_candidates+=("${ds_paid[@]}")
+  for m in "${gpt_paid[@]}"; do echo "$m" | grep -qE "mini|flash|turbo|light|lite" && quick_candidates+=("$m"); done
+  quick_candidates+=("${gpt_paid[@]}")
+  for m in "${qwen_paid[@]}"; do echo "$m" | grep -qE "flash|turbo|light" && quick_candidates+=("$m"); done
+  quick_candidates+=("${qwen_paid[@]}")
+  quick_candidates+=("${grok_models[@]}")
+  quick_candidates+=("${all_fallback[@]}")
+  selected="$(__cc_select_healthy_model "${quick_candidates[@]}")" && assign[quick]="$selected"
+
+  # image: image-specific → GPT → Grok image → anything
+  local image_candidates=()
+  image_candidates+=("${image_models[@]}")
+  image_candidates+=("${gpt_paid[@]}")
+  for m in "${grok_models[@]}"; do echo "$m" | grep -q "image" && image_candidates+=("$m"); done
+  image_candidates+=("${all_fallback[@]}")
+  selected="$(__cc_select_healthy_model "${image_candidates[@]}")" && assign[image]="$selected"
+
+  # default: GPT → DeepSeek → Claude → Qwen → anything
+  local default_candidates=()
+  default_candidates+=("${gpt_paid[@]}")
+  default_candidates+=("${ds_paid[@]}")
+  default_candidates+=("${claude_paid[@]}")
+  default_candidates+=("${qwen_paid[@]}")
+  default_candidates+=("${all_fallback[@]}")
+  selected="$(__cc_select_healthy_model "${default_candidates[@]}")" && assign[default]="$selected"
+
+  # Phase 2: Final verification — re-ping each assigned model (bypass cache)
+  local task
+  for task in code reason quick image default; do
+    local model="${assign[$task]:-}"
+    [[ -z "$model" ]] && continue
+    echo -n "!" >&2
+    unset "__cc_health_cache[$model]"
+    if ! __cc_test_model_health "$model" 10; then
+      echo "" >&2
+      echo "  [FALLBACK]  $model unhealthy for '$task', searching..." >&2
+      # Build fallback candidates for this task
+      local fallback_candidates=()
+      case "$task" in
+        code)    fallback_candidates=("${code_candidates[@]}") ;;
+        reason)  fallback_candidates=("${reason_candidates[@]}") ;;
+        quick)   fallback_candidates=("${quick_candidates[@]}") ;;
+        image)   fallback_candidates=("${image_candidates[@]}") ;;
+        default) fallback_candidates=("${default_candidates[@]}") ;;
+      esac
+      local new_selected=""
+      for m in "${fallback_candidates[@]}"; do
+        [[ "$m" == "$model" ]] && continue
+        echo -n "." >&2
+        if __cc_test_model_health "$m" 10; then
+          new_selected="$m"
+          break
+        fi
+      done
+      if [[ -n "$new_selected" ]]; then
+        echo "    → $new_selected" >&2
+        assign[$task]="$new_selected"
+      else
+        echo "    → No healthy fallback" >&2
+        unset "assign[$task]"
+      fi
+    fi
+  done
+
+  echo " [done]" >&2
+
+  # Phase 3: Hard guard — abort if all tasks lost
+  if [[ ${#assign[@]} -eq 0 ]]; then
+    echo "[!] No healthy models found at all. Settings NOT saved." >&2
+    echo "  Check your CPA proxy or API key: ~/.claude/cc-switch.env" >&2
+    echo "  Then run 'cc' again." >&2
+    return 1
+  fi
+
+  local total="${#assign[@]}"
+  local total_str=""
+  (( total < 5 )) && total_str=" ($total/5 tasks assigned)"
+  echo "  All $total assigned models verified healthy$total_str" >&2
+
+  # Save to settings.json
+  local json
+  json="$(__cc_read_settings)" || return 1
+
+  # Build taskModels JSON
+  local tm_json="{"
+  local first=1
+  for task in code reason quick image default; do
+    local m="${assign[$task]:-}"
+    if [[ -n "$m" ]]; then
+      [[ $first -eq 0 ]] && tm_json+=","
+      tm_json+="\"$task\": \"$m\""
+      first=0
+    fi
+  done
+  tm_json+="}"
+
+  # Update availableModels with CPA list and save taskModels
+  json="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+cpa_list='''$cpa_models'''
+models=[m.strip() for m in cpa_list.split('\n') if m.strip()]
+d['availableModels']=sorted(set(models))
+d['taskModels']=$tm_json
+json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
+")"
+  echo "$json" | __cc_save_settings
+
+  # Return assignments for display
+  for task in code reason quick image default; do
+    [[ -n "${assign[$task]:-}" ]] && echo "${task}|${assign[$task]}"
+  done
+  return 0
+}
+
 # === MODEL CATEGORIZATION HELPER (shared Python snippet) ===
 # Usage: echo '<each-model-on-separate-line>' | __cc_categorize_models [--verbose]
 # --verbose: bracket format (e.g. "[GPT]:\n    model1\n    model2")
@@ -121,16 +535,49 @@ for cat in sorted(cats.keys(), key=lambda c: order.get(c,99)):
 }
 
 # === MAIN COMMAND ===
+# NOTE: If ~/.zshrc has a custom cc() wrapper that delegates to ccx,
+# this function will be overridden after sourcing. The ccx-compatible
+# cc() uses __cc_test_model_health for pre-switch health checks.
+# All other cc-* commands (cc-run, cc-config, cc-test, etc.) work regardless.
 cc() {
   local model="${1:-}"
 
+  # No args: CPA auto-discovery + menu
   if [[ -z "$model" ]]; then
+    echo "Auto-discovering CPA models..."
+    local assignments
+    assignments="$(__cc_auto_assign 2>&1)" || true
+    if [[ -n "$assignments" ]]; then
+      echo ""
+      echo "=== Auto Model Assignment ==="
+      while IFS='|' read -r task m; do
+        printf "  %-8s → %s\n" "$task" "$m"
+      done <<< "$assignments"
+      echo ""
+      echo "  Use 'cc-run <task>' to launch with the assigned model."
+      echo "  Use 'cc-config' to view or override these assignments."
+      echo ""
+    else
+      echo " [skip]"
+    fi
     __cc_show_menu
     return
   fi
 
   local json
   json="$(__cc_read_settings)" || return 1
+
+  # Health-check the model BEFORE switching
+  echo -n "Probing $model..."
+  unset "__cc_health_cache[$model]"
+  if ! __cc_test_model_health "$model" 10; then
+    echo " [unhealthy]"
+    echo "[!]  $model is not responding. Switch cancelled."
+    echo "  Try: cc (no args) to auto-assign a healthy model"
+    echo "  Or:  cc-test           to list healthy models"
+    return 1
+  fi
+  echo " [ok]"
 
   local found
   found="$(echo "$json" | python3 -c "
@@ -192,7 +639,8 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
   elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     auth_key="$ANTHROPIC_API_KEY"
   else
-    auth_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
+    auth_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN','')")"
+    [[ -z "$auth_key" ]] && auth_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
   fi
 
   if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
@@ -211,70 +659,365 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
   eval "$claude_bin"
 }
 
-# === SHORTCUTS ===
+# === TASK-SMART LAUNCH ===
+# Launch Claude Code with task-optimized model from settings.json.taskModels.
+# Health-aware: always does a fresh probe; falls back by same-category then anything.
+cc-run() {
+  local task="${1:-default}"
+
+  local json
+  json="$(__cc_read_settings)" || return 1
+
+  # Read task-model map from settings.json
+  local model=""
+  if echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+if isinstance(tm,dict) and '$task' in tm:
+    print(tm['$task'])
+" 2>/dev/null | grep -q .; then
+    model="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(d['taskModels']['$task'])
+")"
+  fi
+
+  if [[ -z "$model" ]]; then
+    # No taskModels configured — run auto-assign first.
+    # Progress dots go to stderr in real-time. stdout (assignments) is discarded
+    # but saved to settings.json by __cc_auto_assign itself.
+    echo "[cc-run] No taskModels configured. Probing models (dots = one probe):"
+    __cc_auto_assign >/dev/null || true
+    json="$(__cc_read_settings)" || return 1
+    model="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+if isinstance(tm,dict) and '$task' in tm:
+    print(tm['$task'])
+else:
+    print('')
+")"
+    if [[ -z "$model" ]]; then
+      echo "[cc-run] Could not auto-assign models."
+      return 1
+    fi
+  fi
+
+  echo "[cc-run] Task '$task' → model: $model"
+
+  # Always do a fresh health probe (bypass cache)
+  unset "__cc_health_cache[$model]"
+  if ! __cc_test_model_health "$model" 10; then
+    echo "[cc-run] Model '$model' is not responding. Searching for healthy fallback..."
+    # Try same-category models first
+    local cat
+    cat="$(echo "$model" | python3 -c "
+import sys
+m=sys.stdin.read().strip()
+if m.startswith('gpt-') or m.startswith('o'): print('GPT')
+elif m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): print('Claude')
+elif m.startswith('deepseek'): print('DeepSeek')
+elif m.startswith('qwen'): print('Qwen')
+elif m.startswith('grok'): print('Grok')
+else: print('Other')
+")"
+    local fallback=""
+    local models_list
+    models_list="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for m in sorted(d.get('availableModels',[]) or []):
+    print(m)
+")"
+    # Same category first
+    while IFS= read -r m; do
+      local mcat
+      mcat="$(echo "$m" | python3 -c "
+import sys
+m=sys.stdin.read().strip()
+if m.startswith('gpt-') or m.startswith('o'): print('GPT')
+elif m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): print('Claude')
+elif m.startswith('deepseek'): print('DeepSeek')
+elif m.startswith('qwen'): print('Qwen')
+elif m.startswith('grok'): print('Grok')
+else: print('Other')
+")"
+      [[ "$m" == "$model" ]] && continue
+      [[ "$mcat" != "$cat" ]] && continue
+      unset "__cc_health_cache[$m]"
+      if __cc_test_model_health "$m" 5; then fallback="$m"; break; fi
+    done <<< "$models_list"
+    # Any category
+    if [[ -z "$fallback" ]]; then
+      while IFS= read -r m; do
+        [[ "$m" == "$model" ]] && continue
+        unset "__cc_health_cache[$m]"
+        if __cc_test_model_health "$m" 5; then fallback="$m"; break; fi
+      done <<< "$models_list"
+    fi
+    if [[ -n "$fallback" ]]; then
+      echo "[cc-run] Fallback to: $fallback"
+      model="$fallback"
+    else
+      echo "[cc-run] No healthy fallback found. Attempting launch anyway..."
+    fi
+  fi
+
+  cc "$model"
+}
+
+# === SHORTCUTS (task-model aware) ===
 cc-pro() {
-  echo "Switching to claude-opus-4-7..."
-  cc claude-opus-4-7
+  local model=""
+  local json
+  json="$(__cc_read_settings 2>/dev/null)" || true
+  [[ -n "$json" ]] && model="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+print(tm.get('code','claude-opus-4-7'))
+")"
+  echo "Switching to ${model:-claude-opus-4-7} (code task)..."
+  cc "${model:-claude-opus-4-7}"
 }
 
 cc-fast() {
-  echo "Switching to deepseek-v4-flash..."
-  cc deepseek-v4-flash
+  local model=""
+  local json
+  json="$(__cc_read_settings 2>/dev/null)" || true
+  [[ -n "$json" ]] && model="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+print(tm.get('quick','deepseek-v4-flash'))
+")"
+  echo "Switching to ${model:-deepseek-v4-flash} (quick task)..."
+  cc "${model:-deepseek-v4-flash}"
 }
 
 cc-default() {
-  echo "Restoring gpt-5.5..."
-  cc gpt-5.5
+  local model=""
+  local json
+  json="$(__cc_read_settings 2>/dev/null)" || true
+  [[ -n "$json" ]] && model="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+print(tm.get('default','gpt-5.5'))
+")"
+  echo "Restoring ${model:-gpt-5.5} (default task)..."
+  cc "${model:-gpt-5.5}"
+}
+
+# === TASK CONFIGURATION ===
+cc-config() {
+  local task="${1:-}"
+  local model="${2:-}"
+  local reset=0
+  [[ "$task" == "-Reset" || "$task" == "--reset" ]] && { reset=1; task=""; }
+
+  local json
+  json="$(__cc_read_settings)" || return 1
+
+  if [[ "$reset" -eq 1 ]]; then
+    echo "Re-running CPA auto-discovery..."
+    __cc_auto_assign >/dev/null 2>&1 || {
+      echo "Error: could not auto-discover models."
+      return 1
+    }
+    echo ""
+    echo "=== Auto Model Assignment ==="
+    json="$(__cc_read_settings)" || return 1
+    echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+if isinstance(tm,dict):
+    for t in ['code','quick','reason','image','default']:
+        if t in tm:
+            print(f'  {t:8} → {tm[t]}')
+"
+    echo ""
+    echo "Done. Use 'cc-run <task>' to launch."
+    return 0
+  fi
+
+  if [[ -n "$task" && -n "$model" ]]; then
+    # Validate model exists
+    local found
+    found="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+models=d.get('availableModels',[])
+print('yes' if '$model' in models else 'no')
+")"
+    if [[ "$found" != "yes" ]]; then
+      echo "Error: '$model' not in availableModels" >&2
+      return 1
+    fi
+    json="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+if 'taskModels' not in d or not isinstance(d.get('taskModels'),dict):
+    d['taskModels']={}
+d['taskModels']['$task']='$model'
+json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
+")"
+    echo "$json" | __cc_save_settings
+    echo "[OK]  Task '$task' → $model"
+    echo "  Use 'cc-run $task' to launch with this model."
+    return 0
+  fi
+
+  # Show current assignments
+  local has_tm
+  has_tm="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+print('yes' if isinstance(tm,dict) and tm else 'no')
+")"
+  if [[ "$has_tm" != "yes" ]]; then
+    echo "No task model assignments configured."
+    echo "Run 'cc' (no arguments) for auto-discovery, or use:"
+    echo "  cc-config -Reset"
+    return 0
+  fi
+
+  echo ""
+  echo "=== Task Model Assignments ==="
+  echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+if isinstance(tm,dict):
+    for t in ['code','quick','reason','image','default']:
+        if t in tm:
+            print(f'  {t:8} → {tm[t]}')
+"
+  echo ""
+  echo "Override:"
+  echo "  cc-config <task> <model>      Set specific model for a task"
+  echo "  cc-config -Reset              Re-run CPA auto-discovery"
+}
+
+# === MODEL HEALTH TESTING ===
+cc-test() {
+  local remove_dead=0
+  local timeout_sec=10
+  local parallel=5
+
+  for arg in "$@"; do
+    case "$arg" in
+      -RemoveDead|--remove-dead) remove_dead=1 ;;
+      -Timeout|--timeout) timeout_sec="${2:-10}"; shift ;;
+      -Parallel|--parallel) parallel="${2:-5}"; shift ;;
+    esac
+    shift 2>/dev/null || true
+  done
+
+  local json
+  json="$(__cc_read_settings)" || return 1
+
+  local models
+  models="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+for m in sorted(d.get('availableModels',[]) or []):
+    print(m)
+")"
+
+  local total=0 healthy=0 quota=0 failed=0
+  local failed_models=()
+
+  echo ""
+  echo "=== Model Health Test ==="
+  echo "  Testing $(( $(echo "$models" | wc -l | tr -d ' ') )) models (timeout: ${timeout_sec}s)..."
+  echo ""
+
+  while IFS= read -r model; do
+    [[ -z "$model" ]] && continue
+    total=$((total + 1))
+    echo -n "  [$total] $model ... "
+    unset "__cc_health_cache[$model]"
+    if __cc_test_model_health "$model" "$timeout_sec"; then
+      echo "[OK]"
+      healthy=$((healthy + 1))
+    else
+      # Distinguish quota vs generic failure by checking response
+      local ep_raw base_url api_key
+      ep_raw="$(__cc_resolve_endpoint)"
+      api_key="${ep_raw##*|}"
+      base_url="${ANTHROPIC_BASE_URL:-}"
+      [[ -z "$base_url" ]] && base_url="${ep_raw%|*}"
+      base_url="${base_url%/v1/models}"
+      local body="{\"model\":\"$model\",\"system\":\"You are a helpful assistant.\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}"
+      local resp
+      resp="$(curl -s --connect-timeout 5 --max-time 5 -X POST "${base_url%/}/v1/messages" \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" \
+        -d "$body" 2>/dev/null || true)"
+      if echo "$resp" | grep -qiE "quota|429|402|insufficient|balance"; then
+        echo "[QUOTA]"
+        quota=$((quota + 1))
+      else
+        echo "[FAIL]"
+        failed=$((failed + 1))
+        failed_models+=("$model")
+      fi
+    fi
+  done <<< "$models"
+
+  echo ""
+  echo "=== Results ==="
+  echo "  Total   : $total"
+  echo "  Healthy : $healthy"
+  echo "  Quota   : $quota"
+  echo "  Failed  : $failed"
+
+  if [[ "$remove_dead" -eq 1 && ${#failed_models[@]} -gt 0 ]]; then
+    echo ""
+    echo "Removing ${#failed_models[@]} failed models..."
+    local remove_list=""
+    for m in "${failed_models[@]}"; do
+      remove_list+="$m"$'\n'
+    done
+    json="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+remove_set=set('''$remove_list'''.strip().split('\n'))
+d['availableModels']=[m for m in d.get('availableModels',[]) if m not in remove_set]
+json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
+")"
+    echo "$json" | __cc_save_settings
+    echo "Done. Run 'cc-sync' to re-fetch from CPA."
+  fi
+
+  echo ""
+  echo "Tip: cc-test -RemoveDead    Remove failed models"
 }
 
 # === CPA SYNC ===
 cc-sync() {
-  local list_mode=0 force=0 remove=0
+  local list_mode=0 force=0 remove=0 reassign=0
 
   for arg in "$@"; do
     case "$arg" in
       -List|--list) list_mode=1 ;;
       -Force|--force) force=1 ;;
       -Remove|--remove) remove=1 ;;
+      -Reassign|--reassign) reassign=1 ;;
     esac
   done
 
-  # Priority: current shell ANTHROPIC_BASE_URL > cc-switch.env > settings.json
-  local shell_url="${ANTHROPIC_BASE_URL:-}"
-  local shell_key="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
-
-  # Load cc-switch.env as fallback (AFTER saving shell values)
-  CC_SWITCH_SKIP_ENV=0 __cc_load_env
-
-  # Priority: shell ANTHROPIC_BASE_URL > file CPA_MODELS_URL > settings.json
-  local cpa_url="${shell_url:+${shell_url%/}/v1/models}"
-  cpa_url="${cpa_url:-${CPA_MODELS_URL:-}}"
-  local api_key="${shell_key:-}"
-  api_key="${api_key:-${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}}"
-
-  if [[ -z "$cpa_url" ]]; then
-    cpa_url="${ANTHROPIC_BASE_URL:+${ANTHROPIC_BASE_URL%/}/v1/models}"
-  fi
-  if [[ -z "$cpa_url" ]]; then
-    local json
-    json="$(__cc_read_settings 2>/dev/null)" || true
-    if [[ -n "$json" ]]; then
-      local base_url
-      base_url="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_BASE_URL','')")"
-      [[ -n "$base_url" ]] && cpa_url="${base_url%/}/v1/models"
-    fi
-  fi
-
-  if [[ -z "$api_key" ]]; then
-    local json
-    json="$(__cc_read_settings 2>/dev/null)" || true
-    if [[ -n "$json" ]]; then
-      api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
-      if [[ -z "$api_key" ]]; then
-        api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN','')")"
-      fi
-    fi
-  fi
+  # Use unified endpoint resolver
+  local ep_raw
+  ep_raw="$(__cc_resolve_endpoint)"
+  local api_key="${ep_raw##*|}"
+  local cpa_url="${ep_raw%|*}"
 
   if [[ -z "$cpa_url" || -z "$api_key" ]]; then
     echo "Error: CPA_MODELS_URL or API key not configured." >&2
@@ -290,7 +1033,7 @@ cc-sync() {
   echo "  $cpa_url"
 
   local response
-  response="$(curl -s --max-time 15 "$cpa_url" \
+  response="$(curl -s --connect-timeout 5 --max-time 15 "$cpa_url" \
     -H "Authorization: Bearer $api_key" \
     -H "Content-Type: application/json")" || {
     echo "Error fetching CPA models: curl failed" >&2
@@ -446,10 +1189,18 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
     echo "  Status: fully in sync"
   fi
 
+  # Handle -Reassign
+  if [[ "$reassign" -eq 1 ]]; then
+    echo ""
+    echo "Re-assigning task models..."
+    __cc_auto_assign >/dev/null 2>&1 || echo "  [skip] Auto-assign failed"
+  fi
+
   echo ""
   echo "Tip: cc-sync --list      -- show full model list only"
   echo "Tip: cc-sync --force     -- auto-add new models"
   echo "Tip: cc-sync --remove    -- remove obsolete models"
+  echo "Tip: cc-sync --reassign  -- sync + reassign task models"
 }
 
 # === SKILL MENU MANAGEMENT ===
@@ -778,6 +1529,28 @@ cc-status() {
   echo "  Available: $available_count models"
   echo ""
 
+  # Show task assignments if configured
+  local has_tm
+  has_tm="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+print('yes' if isinstance(tm,dict) and tm else 'no')
+")"
+  if [[ "$has_tm" == "yes" ]]; then
+    echo "Task assignments:"
+    echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+if isinstance(tm,dict):
+    for t in ['code','quick','reason','image','default']:
+        if t in tm:
+            print(f'  {t:8} → {tm[t]}')
+"
+    echo ""
+  fi
+
   echo "$json" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -821,29 +1594,56 @@ __cc_show_menu() {
   echo ""
   echo "=== Claude Code Model Switcher ==="
   echo ""
-  echo "  cc <model>         Switch and launch"
-  echo "  cc                 This menu"
-  echo "  cc-status          Full model inventory"
+  echo "  cc <model>         Switch and launch (with health check)"
+  echo "  cc                 Auto-discover CPA + assign tasks + menu"
+  echo "  cc-run <task>      Launch with task model (code/quick/reason/image/default)"
+  echo "  cc-config          View/override task-model assignments"
+  echo "  cc-status          Full model inventory with task assignments"
   echo "  cc-sync            Sync models from CPA"
   echo "    cc-sync --list    Show full CPA model list"
   echo "    cc-sync --force   Auto-add new models"
   echo "    cc-sync --remove  Remove obsolete models"
+  echo "    cc-sync --reassign Sync + reassign task models"
   echo ""
+  echo "  cc-test            Test all models for health"
   echo "  cc-audit           Audit skill visibility"
   echo "  cc-hide <skill>    Hide skill or plugin"
   echo "  cc-show <skill>    Restore hidden skill"
   echo "  cc-profile <name>  Switch preset (default|minimal|dev)"
   echo "  cc-commands        List/manage custom commands"
   echo ""
-  echo "  cc-pro             claude-opus-4-7"
-  echo "  cc-fast            deepseek-v4-flash"
-  echo "  cc-default         gpt-5.5"
+  echo "  cc-pro             Code task model"
+  echo "  cc-fast            Quick task model"
+  echo "  cc-default         Default task model"
   echo ""
   echo "Current: $current"
   echo ""
 
   local json
   json="$(__cc_read_settings 2>/dev/null)" || return
+
+  # Show task assignments if available
+  local has_tm
+  has_tm="$(echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+print('yes' if isinstance(tm,dict) and tm else 'no')
+" 2>/dev/null)"
+  if [[ "$has_tm" == "yes" ]]; then
+    echo "Task assignments (cc-config to change):"
+    echo "$json" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+tm=d.get('taskModels',{})
+if isinstance(tm,dict):
+    for t in ['code','quick','reason','image','default']:
+        if t in tm:
+            print(f'  {t:8} → {tm[t]}')
+"
+    echo ""
+  fi
+
   echo "$json" | python3 -c "
 import json,sys
 d=json.load(sys.stdin)
