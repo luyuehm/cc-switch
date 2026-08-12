@@ -153,14 +153,14 @@ __cc_test_model_health() {
   local now
   now="$(date +%s)"
 
-  # Check cache (defensive: skip if format is corrupt)
+  # Check cache (defensive: skip if format is corrupt — no arithmetic needed)
   local cached="${__cc_health_cache[$model]:-}"
   if [[ -n "$cached" && "$cached" == *:* ]]; then
     local cache_ts="${cached%%:*}"
     local cache_val="${cached##*:}"
-    # Defend against empty or non-numeric cache_ts
-    if [[ -n "$cache_ts" && "$cache_ts" =~ ^[0-9]+$ && -n "$cache_val" ]]; then
-      if (( now - cache_ts < CC_HEALTH_CACHE_TTL )); then
+    # Only use cache if timestamp is numeric and value is valid
+    if [[ "$cache_ts" =~ ^[0-9]+$ ]] && [[ "$cache_val" =~ ^(healthy|unhealthy)$ ]]; then
+      if [[ $(( now - cache_ts )) -lt $CC_HEALTH_CACHE_TTL ]]; then
         [[ "$cache_val" == "healthy" ]] && return 0 || return 1
       fi
     fi
