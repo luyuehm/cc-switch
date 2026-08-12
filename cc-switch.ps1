@@ -521,6 +521,15 @@ function global:cc {
     $json.fallbackModel = @($Model)
     $json.model = $Model
 
+    # Add modelOverrides to suppress 'unknown model' context-window warning
+    if (-not $json.PSObject.Properties['modelOverrides']) {
+        $json | Add-Member -NotePropertyName 'modelOverrides' -NotePropertyValue @{}
+    }
+    $json.modelOverrides.$Model = @{ contextWindow = 131072; maxTokens = 16384 }
+
+    # Double insurance: disable enforcement entirely
+    $json.env | Add-Member -NotePropertyName 'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT' -NotePropertyValue '1' -Force
+
     Save-CCSettings $json
 
     Write-Host "OK: Model switched" -ForegroundColor Green

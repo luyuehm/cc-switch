@@ -96,6 +96,8 @@ When user provides a model name or number, switch by modifying `settings.json`:
    - `env.ANTHROPIC_REASONING_MODEL`
    - `fallbackModel[0]`
    - `model`
+   - `modelOverrides[model]`（上下文窗口映射，消除 unknown model 警告）
+   - `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT`（双重保障）
 3. **Save `settings.json`**.
 4. **Report**: `Switched: <old> → <new>  |  Run /reset to apply`
 

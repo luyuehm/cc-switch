@@ -28,6 +28,38 @@ curl -fsSL https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.sh |
 bash install.sh && source ~/.zshrc
 ```
 
+### CPA Endpoint Switching (macOS)
+
+Switch between local / remote CPA endpoints without restarting. The shim (8316) reads `~/.claude/current_endpoint.json` dynamically per request.
+
+```bash
+cc-orcl       # Switch to orcl remote CPA
+cc-aws        # Switch to aws remote CPA
+cc-local      # Switch back to local CPA (127.0.0.1:8317)
+cc-endpoint   # Show current endpoint
+```
+
+The endpoint file stores the target URL and (for remote) API key. Remote keys live only in `~/.claude/current_endpoint.json` — never in this repo.
+
+**Adding a new endpoint:**
+1. Edit `~/.claude/cpa-endpoints.json` (not in this repo):
+   ```json
+   { "my-ep": { "url": "https://your-cpa.example.com", "key": "your-key" } }
+   ```
+2. Add a shell function in `cc-switch.sh`:
+   ```bash
+   cc-my-ep() {
+     local entry; entry="$(__cc_read_endpoint "my-ep")" || return 1
+     local url key
+     url="$(echo "$entry" | python3 -c "import json,sys; print(json.load(sys.stdin)['url'])")"
+     key="$(echo "$entry" | python3 -c "import json,sys; print(json.load(sys.stdin).get('key',''))")"
+     __cc_switch_endpoint "my-ep" "$url" "$key"
+   }
+   ```
+3. `source ~/.claude/cc-switch.sh` to reload, then `cc-my-ep` to switch.
+
+**Security:** `~/.claude/cpa-endpoints.json` is `chmod 600` and lives outside the repo. Never commit real URLs or keys into this repository.
+
 ## 🪟 Windows / PowerShell (pwsh)
 
 *Recommended path for CPA auto-discovery and task scheduling.*
@@ -654,6 +686,8 @@ Path: `~/.claude/settings.json`
 | `skillOverrides` | `cc-hide`/`cc-show`/`cc-profile` | Hidden skills control |
 | `env.ANTHROPIC_API_KEY` | `.env` fallback | API key fallback |
 | `env.ANTHROPIC_BASE_URL` | `.env` fallback | Endpoint fallback |
+| `modelOverrides` | `cc <model>` | Model context-window mapping, suppresses unknown model warning |
+| `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` | `cc <model>` | Double insurance: skip window check even if model not in modelOverrides |
 
 ---
 
@@ -712,6 +746,8 @@ cc-switch/
 | `cc-profile <name>` | Switch preset (default/minimal/dev) |
 | `cc-commands` | Manage custom slash commands |
 | `cc-theme` | List/switch Oh My Posh themes |
+| `cc-orcl` / `cc-aws` / `cc-local` | Switch CPA endpoint (local / remote) |
+| `cc-endpoint` | Show current CPA endpoint |
 
 ---
 

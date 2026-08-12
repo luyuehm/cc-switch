@@ -3,6 +3,9 @@
 *.env
 !*.env.example
 
+# CPA endpoint config — real URLs & keys live here, never commit
+cpa-endpoints.json
+
 # Python cache
 __pycache__/
 *.pyc

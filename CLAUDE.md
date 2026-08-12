@@ -73,6 +73,10 @@ Single PowerShell file. All functions are `global:` scope for availability after
 | `cc-commands list\|create\|remove` | Manage custom slash commands (markdown frontmatter in `~/.claude/commands/`) |
 | `cc-theme <name>` | List or switch Oh My Posh themes (100+ `.omp.json` files). Live preview via `oh-my-posh init pwsh --config` |
 | `cc-pro` / `cc-fast` / `cc-default` | Shortcuts: claude-opus-4-7 / deepseek-v4-flash / gpt-5.5 |
+| `cc-orcl` / `cc-aws` / `cc-local` | Switch CPA endpoint (write `~/.claude/current_endpoint.json`) |
+| `cc-endpoint` | Show current CPA endpoint |
+
+**Endpoint switching** — writes `~/.claude/current_endpoint.json` (`{ name, url, key }`). Real URLs and keys live in `~/.claude/cpa-endpoints.json` (600, outside repo). The shim (8316) reads the file per request, dynamically forwarding to the target CPA endpoint. **Never commit real URLs or keys into this repo.**
 | `Get-CCModel` | Returns current model name from settings.json |
 
 **Model switching atomicity** — all 10+ fields updated in a single `Save-CCSettings` call. Claude Code launched with `--bare` flag for OAuth bypass. API key resolved from process env (loaded from `.env`) then falls back to `settings.json` values, with `ANTHROPIC_AUTH_TOKEN` priority.
@@ -183,8 +187,10 @@ CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models   # optional
 - `env.ANTHROPIC_MODEL` — current model
 - `availableModels` — model list (synced via `cc-sync`)
 - `taskModels` — task-to-model assignments (set by `cc` auto-discovery or `cc-config`)
+- `modelOverrides` — model context-window mapping (set by `cc <model>`, suppresses unknown model warning)
 - `skillOverrides` — hidden skills (`cc-hide`/`cc-profile`)
 - `model`, `fallbackModel` — additional model refs (all switched atomically)
+- `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` — skip window check (set by `cc <model>`)
 
 ## Important Notes
 

@@ -161,6 +161,11 @@ for k in ['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_H
     d['env'][k]=model
 d['fallbackModel']=[model]
 d['model']=model
+# Add modelOverrides to suppress 'unknown model' context-window warning
+d['modelOverrides']=d.get('modelOverrides',{})
+d['modelOverrides'][model]={'contextWindow':131072,'maxTokens':16384}
+# Double insurance: disable enforcement entirely
+d['env']['CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT']='1'
 existing=set(d.get('availableModels',[]))
 existing.add(model)
 d['availableModels']=sorted(existing)
@@ -225,6 +230,77 @@ cc-fast() {
 cc-default() {
   echo "Restoring gpt-5.5..."
   cc gpt-5.5
+}
+
+# === CPA ENDPOINT SWITCHING ===
+# Switch between local / remote CPA endpoints by writing ~/.claude/current_endpoint.json.
+# The shim (8316) reads this file dynamically per request, so no restart is needed.
+# Real endpoint URLs and keys live in ~/.claude/cpa-endpoints.json (600, gitignored).
+CC_ENDPOINT_FILE="$HOME/.claude/current_endpoint.json"
+CC_ENDPOINTS_DB="$HOME/.claude/cpa-endpoints.json"
+
+__cc_switch_endpoint() {
+  local name="$1" url="$2" epkey="$3"
+  umask 077
+  cat > "$CC_ENDPOINT_FILE" <<JSON
+{"name":"$name","url":"$url","key":"$epkey"}
+JSON
+  echo "[OK]  Endpoint switched -> $name"
+  echo "  URL: $url"
+  [[ -n "$epkey" ]] && echo "  Auth: remote key (from cpa-endpoints.json)" || echo "  Auth: local config.yaml key"
+}
+
+__cc_read_endpoint() {
+  local name="$1"
+  if [[ ! -f "$CC_ENDPOINTS_DB" ]]; then
+    echo "Error: $CC_ENDPOINTS_DB not found. Create it with your endpoint URLs and keys." >&2
+    return 1
+  fi
+  local entry
+  entry="$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$CC_ENDPOINTS_DB'))
+    e = d.get('$name')
+    if e: print(json.dumps(e))
+except Exception: pass
+" 2>/dev/null)"
+  if [[ -z "$entry" ]]; then
+    echo "Error: endpoint '$name' not found in $CC_ENDPOINTS_DB" >&2
+    return 1
+  fi
+  echo "$entry"
+}
+
+cc-orcl() {
+  local entry
+  entry="$(__cc_read_endpoint "orcl")" || return 1
+  local url key
+  url="$(echo "$entry" | python3 -c "import json,sys; print(json.load(sys.stdin)['url'])")"
+  key="$(echo "$entry" | python3 -c "import json,sys; print(json.load(sys.stdin).get('key',''))")"
+  __cc_switch_endpoint "orcl" "$url" "$key"
+}
+
+cc-aws() {
+  local entry
+  entry="$(__cc_read_endpoint "aws")" || return 1
+  local url key
+  url="$(echo "$entry" | python3 -c "import json,sys; print(json.load(sys.stdin)['url'])")"
+  key="$(echo "$entry" | python3 -c "import json,sys; print(json.load(sys.stdin).get('key',''))")"
+  __cc_switch_endpoint "aws" "$url" "$key"
+}
+
+cc-local() {
+  __cc_switch_endpoint "local" "http://127.0.0.1:8317" ""
+}
+
+cc-endpoint() {
+  if [[ -f "$CC_ENDPOINT_FILE" ]]; then
+    echo "=== Current CPA Endpoint ==="
+    cat "$CC_ENDPOINT_FILE"
+  else
+    echo "No endpoint file. Using default: local (http://127.0.0.1:8317)"
+  fi
 }
 
 # === CPA SYNC ===
