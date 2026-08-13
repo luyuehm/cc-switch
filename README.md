@@ -226,6 +226,28 @@ before launching Claude Code to avoid the "Both set" warning.
 ### JSON Validation
 `settings.json` is validated as JSON on every read. If corrupt (empty, truncated, malformed), it's reset to `{"availableModels":[],"env":{}}`.
 
+### modelOverrides Removed (v2.4.1+)
+
+**背景 / Background:** 新版 Claude Code 修改了 `modelOverrides` 的 schema —— 该字段的值必须是**字符串**（模型别名映射），不再支持 `{ "maxTokens": 1048576 }` 这类**对象**格式。旧格式会导致整个 `settings.json` 被跳过（Settings Error），表现为登录反复提示、模型切换失效。
+
+**修复 / Fix:**
+- `cc <model>` 不再写入 `modelOverrides[model]` 对象
+- 切换时**自动清理** `settings.json` 中残留的旧 `modelOverrides` 条目（单条删除；若清空则整个字段移除）
+- 改用 `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT=1` 抑制 "unknown model" 上下文窗口警告 —— 该机制所有版本均支持，且不依赖易变的 schema
+
+**手动修复已有配置:** 打开 `~/.claude/settings.json`，删除 `modelOverrides` 字段（或确保其值为字符串映射）：
+
+```json
+{
+  "availableModels": [],
+  "env": {
+    "CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT": "1"
+  }
+}
+```
+
+> ℹ️ 若你需要为特定模型设置更大 `maxTokens`，新版 Claude Code 可能已将其改为顶层字段，或不再支持自定义 token 上限，请参考所装版本文档。
+
 ## ⚠ Multi-Key Environment: Avoiding Auth Conflicts
 
 ### Problem
@@ -690,8 +712,8 @@ Path: `~/.claude/settings.json`
 | `skillOverrides` | `cc-hide`/`cc-show`/`cc-profile` | Hidden skills control |
 | `env.ANTHROPIC_API_KEY` | `.env` fallback | API key fallback |
 | `env.ANTHROPIC_BASE_URL` | `.env` fallback | Endpoint fallback |
-| `modelOverrides` | `cc <model>` | Model context-window mapping, suppresses unknown model warning |
-| `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` | `cc <model>` | Double insurance: skip window check even if model not in modelOverrides |
+| `modelOverrides` | (removed) | ⚠️ 新版 Claude Code 不再支持对象值格式。cc-switch 会在切换时自动清理旧条目。改用 `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` 替代。 |
+| `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` | `cc <model>` | 抑制 unknown model 上下文窗口警告（所有版本均支持） |
 
 ---
 

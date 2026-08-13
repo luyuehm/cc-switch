@@ -641,10 +641,13 @@ for k in ['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_H
     d['env'][k]=model
 d['fallbackModel']=[model]
 d['model']=model
-# Add modelOverrides to suppress 'unknown model' context-window warning
-d['modelOverrides']=d.get('modelOverrides',{})
-d['modelOverrides'][model]={'contextWindow':131072,'maxTokens':16384}
-# Double insurance: disable enforcement entirely
+# Remove stale modelOverrides entries (new Claude Code schema rejects object values)
+# Unknown-model window enforcement is disabled via env var below (supported by all versions).
+if model in d.get('modelOverrides',{}):
+    del d['modelOverrides'][model]
+if not d.get('modelOverrides',{}):
+    d.pop('modelOverrides',None)
+# Suppress 'unknown model' context-window warning
 d['env']['CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT']='1'
 existing=set(d.get('availableModels',[]))
 existing.add(model)

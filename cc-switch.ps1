@@ -521,13 +521,16 @@ function global:cc {
     $json.fallbackModel = @($Model)
     $json.model = $Model
 
-    # Add modelOverrides to suppress 'unknown model' context-window warning
-    if (-not $json.PSObject.Properties['modelOverrides']) {
-        $json | Add-Member -NotePropertyName 'modelOverrides' -NotePropertyValue @{}
+    # Remove stale modelOverrides entries (new Claude Code schema rejects object values)
+    # Unknown-model window enforcement is disabled via env var below (supported by all versions).
+    if ($json.PSObject.Properties['modelOverrides']) {
+        $json.modelOverrides.PSObject.Properties.Remove($Model)
+        if ($json.modelOverrides.PSObject.Properties.Name.Count -eq 0) {
+            $json.PSObject.Properties.Remove('modelOverrides')
+        }
     }
-    $json.modelOverrides.$Model = @{ contextWindow = 131072; maxTokens = 16384 }
 
-    # Double insurance: disable enforcement entirely
+    # Suppress 'unknown model' context-window warning
     $json.env | Add-Member -NotePropertyName 'CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT' -NotePropertyValue '1' -Force
 
     Save-CCSettings $json

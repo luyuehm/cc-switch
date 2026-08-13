@@ -96,8 +96,8 @@ When user provides a model name or number, switch by modifying `settings.json`:
    - `env.ANTHROPIC_REASONING_MODEL`
    - `fallbackModel[0]`
    - `model`
-   - `modelOverrides[model]`（上下文窗口映射，消除 unknown model 警告）
-   - `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT`（双重保障）
+   - `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT`（消除 unknown model 警告）
+     - ⚠️ 不再写入 `modelOverrides[model]` 对象：新版 Claude Code 的 schema 要求该字段值为字符串（模型别名映射），对象格式会导致整个 settings.json 被跳过。cc-switch 会在切换时自动清理旧的 modelOverrides 条目。
 3. **Save `settings.json`**.
 4. **Report**: `Switched: <old> → <new>  |  Run /reset to apply`
 
