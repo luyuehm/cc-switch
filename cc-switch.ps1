@@ -566,27 +566,10 @@ function global:cc {
     Write-Host "Launching Claude Code (auth token, --bare)..." -ForegroundColor Cyan
     Write-Host ""
 
-    # Capture stderr to detect 503 at runtime
-    $errorOutput = $null
+    # Launch directly - no pipeline/redirect (Claude Code auto-detects non-TTY and switches to --print mode)
+    # 503 detection is already covered by the health check above. Stderr goes to terminal naturally.
     try {
-        & $claudeExe --bare 2>&1 | ForEach-Object {
-            if ($_ -is [System.Management.Automation.ErrorRecord]) {
-                $errorOutput = $_.Exception.Message
-                Write-Host $_ -ForegroundColor Red
-                # Check for 503 / overloaded / unavailable
-                if ($_.Exception.Message -imatch "503|overloaded|unavailable|capacity|too many requests") {
-                    Write-Host ""
-                    Write-Host "[!]  Model returned 503 / overloaded error." -ForegroundColor Yellow
-                    Write-Host "  The health check passed but the model may be rate-limited at runtime." -ForegroundColor Yellow
-                    Write-Host "  Run 'cc' to auto-assign a different model, or switch to another model with:" -ForegroundColor Yellow
-                    Write-Host "    cc <model-name>" -ForegroundColor White
-                    Write-Host "  List models: cc-status" -ForegroundColor White
-                    Write-Host ""
-                }
-            } else {
-                Write-Host $_
-            }
-        }
+        & $claudeExe --bare
     } catch {
         Write-Host "Error launching Claude Code: $_" -ForegroundColor Red
     }
