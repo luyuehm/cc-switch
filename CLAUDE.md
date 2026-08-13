@@ -88,7 +88,7 @@ Single bash/zsh file for macOS. Feature parity with PowerShell version: health c
 | `cc <model>` | ✅ | ✅ | **Pre-switch health check** → atomic model switch, then launches Claude Code |
 | `cc` (no args) | ✅ | ✅ | **Auto-discovers CPA models**, assigns best model per task, saves to `settings.json → taskModels` |
 | `cc-run <task>` | ✅ | ✅ | Task-smart launch from `settings.json.taskModels`. Always bypasses health cache for fresh probe |
-| `cc-config` | ✅ | ✅ | View current `taskModels` assignment. `-Reset` re-runs CPA auto-discovery |
+| `cc-config` | ✅ | ✅ | View current `taskModels` assignment. `-Reset` re-runs CPA auto-discovery. `cc-config <task> <model>` overrides a specific task |
 | `cc-sync` | ✅ | ✅ | Fetch models from CPA endpoint, diff with local |
 | `cc-test` | ✅ | ✅ | Test all models for health (curl-based on macOS, Invoke-RestMethod on Windows) |
 | `cc-status` | ✅ | ✅ | Full model inventory with task assignments |
@@ -98,6 +98,8 @@ Single bash/zsh file for macOS. Feature parity with PowerShell version: health c
 | `cc-commands` | ✅ | ✅ | Manage custom slash commands |
 | `cc-theme` | ✅ | ✅ | List or switch Oh My Posh themes |
 | `cc-pro/cc-fast/cc-default` | ✅ | ✅ | Task-model-aware shortcuts |
+| `cc-orcl` / `cc-aws` / `cc-local` | ✅ | ✅ | Switch CPA endpoint (write `~/.claude/current_endpoint.json`) |
+| `cc-endpoint` | ✅ | ✅ | Show current CPA endpoint |
 
 **macOS-specific implementation notes:**
 - Health cache: zsh associative array (`typeset -A __cc_health_cache`) with 60s TTL
@@ -105,6 +107,8 @@ Single bash/zsh file for macOS. Feature parity with PowerShell version: health c
 - JSON: `python3` (stdlib `json`), tested on macOS Python 3.9+
 - Endpoint fallback: reads `~/.openclaw/.env` for `CLAUDE_CODE_BASE_URL` and `CPA_API_KEY` when shell env vars are absent
 - ccx integration: `install.sh` detects existing `ccx` and installs cc-switch alongside it; `cc()` in `.zshrc` can delegate to `ccx` after cc-switch's health check
+
+**Endpoint switching** — writes `~/.claude/current_endpoint.json` (`{ name, url, key }`). Real URLs and keys live in `~/.claude/cpa-endpoints.json` (600, outside repo). The shim (8316) reads the file per request, dynamically forwarding to the target CPA endpoint. **Never commit real URLs or keys into this repo.**
 
 **Model switching atomicity** — all 10+ fields updated in a single `Save-CCSettings` call. Claude Code launched with `--bare` flag for OAuth bypass. API key resolved from process env (loaded from `.env`) then falls back to `settings.json` values, with `ANTHROPIC_AUTH_TOKEN` priority.
 
@@ -214,8 +218,10 @@ CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models   # optional
 - `env.ANTHROPIC_MODEL` — current model
 - `availableModels` — model list (synced via `cc-sync`)
 - `taskModels` — task-to-model assignments (set by `cc` auto-discovery or `cc-config`)
+- `modelOverrides` — model context-window mapping (set by `cc <model>`, suppresses unknown model warning)
 - `skillOverrides` — hidden skills (`cc-hide`/`cc-profile`)
 - `model`, `fallbackModel` — additional model refs (all switched atomically)
+- `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` — skip window check (set by `cc <model>`)
 
 ## Important Notes
 

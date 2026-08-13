@@ -28,8 +28,9 @@ DEFAULT_CPA_URL = os.environ.get("CPA_TARGET_URL", "https://your-remote-cpa-endp
 DEFAULT_CPA_KEY = os.environ.get("CPA_API_KEY", "your-cpa-api-key-here")
 
 # 增加 SenseNova 第三方原生渠道支持
+# 真实 key 通过环境变量 SENSENOVA_API_KEY 注入（不入库）。未配置时留空。
 SENSENOVA_URL = os.environ.get("SENSENOVA_TARGET_URL", "https://token.sensenova.cn")
-SENSENOVA_KEY = os.environ.get("SENSENOVA_API_KEY", "sk-vCM4QEx2WrfHRFhpHPWccA835WFm8TXT")
+SENSENOVA_KEY = os.environ.get("SENSENOVA_API_KEY", "")
 
 proxy_handler = urllib.request.ProxyHandler({})
 opener = urllib.request.build_opener(proxy_handler)
