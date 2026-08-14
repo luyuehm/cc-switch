@@ -821,6 +821,11 @@ for k in ['ANTHROPIC_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_H
     d['env'][k]=model
 d['fallbackModel']=[model]
 d['model']=model
+# Remove stale modelOverrides (new Claude Code schema rejects object values)
+if model in d.get('modelOverrides',{}):
+    del d['modelOverrides'][model]
+if not d.get('modelOverrides',{}):
+    d.pop('modelOverrides',None)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
   echo "$json2" | __cc_save_settings
