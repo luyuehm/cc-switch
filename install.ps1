@@ -6,13 +6,24 @@
 
 param([switch]$SkipProfile)
 
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# Repo release version. VERSION is authoritative — it is bumped at release time
+# to match the new git tag. The literal below is only a fallback for running this
+# script outside a checkout (e.g. `irm ... | iex`); keep it in sync.
+$ccReleaseVersion = "2.5.0"
+$ccVersionFile = Join-Path $scriptDir "VERSION"
+if ((Test-Path $ccVersionFile) -and (Test-Path (Join-Path $scriptDir "install.ps1"))) {
+    $ccReleaseVersion = (Get-Content $ccVersionFile -Raw).Trim()
+}
+
 Write-Host ""
 Write-Host " ===============================================" -ForegroundColor Cyan
 Write-Host "   cc-switch — Claude Code Model + Menu Manager" -ForegroundColor Cyan
+Write-Host "   Windows Edition" -ForegroundColor Cyan
+Write-Host "   Release v$ccReleaseVersion" -ForegroundColor Cyan
 Write-Host " ===============================================" -ForegroundColor Cyan
 Write-Host ""
-
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # [1/5] Copy cc-switch.ps1 to ~/.claude/
 Write-Host "[1/5] Installing core script to ~/.claude/cc-switch.ps1..." -ForegroundColor Yellow

@@ -8,14 +8,23 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Repo release version. VERSION is authoritative — it is bumped at release time
+# to match the new git tag. The literal below is only a fallback for running
+# this script outside a checkout (e.g. `curl ... | bash`); keep it in sync.
+CC_RELEASE_VERSION="2.5.0"
+if [[ -f "$SCRIPT_DIR/VERSION" && -f "$SCRIPT_DIR/install.sh" ]]; then
+  CC_RELEASE_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
+fi
+
 echo ""
 echo " ==============================================="
 echo "   cc-switch — Claude Code Model + Menu Manager"
-echo "   macOS Edition  v2.4.0"
+echo "   macOS Edition"
+echo "   Release v${CC_RELEASE_VERSION} · macOS feature set v2.4.0"
 echo " ==============================================="
 echo ""
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # [1/6] Copy cc-switch.sh to ~/.claude/
 echo "[1/6] Installing core script to ~/.claude/cc-switch.sh..."

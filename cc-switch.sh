@@ -1,7 +1,8 @@
 # cc-switch.sh — Claude Code Model Switcher for macOS (zsh/bash)
 # Source: . ./cc-switch.sh   or add to ~/.zshrc
 # https://github.com/luyuehm/cc-switch
-# v2.4.0 — Health check, CPA auto-discovery, cc-run, cc-config, cc-test
+# Repo release version: see VERSION (bumped with each git tag)
+# macOS feature set v2.4.0 — health check, CPA auto-discovery, cc-run, cc-config, cc-test
 
 CC_SETTINGS_PATH="$HOME/.claude/settings.json"
 CC_ENV_PATH="$HOME/.claude/cc-switch.env"

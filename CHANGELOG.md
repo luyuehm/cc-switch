@@ -2,6 +2,23 @@
 
 All notable changes to cc-switch. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); each version maps to a git tag.
 
+The repo release version lives in [`VERSION`](VERSION) and is bumped at release time to match the new tag. See **Versioning** in the README for how that relates to each platform's *feature set* label.
+
+## [Unreleased]
+
+### Added
+
+- **`VERSION`** — single source of truth for the repo release version. Both installers read it and print it in their banner, falling back to an embedded literal when run outside a checkout.
+
+### Changed
+
+- **`install.sh` / `install.ps1`** — banners now show the repo release version instead of a hardcoded string. `install.sh` previously printed `v2.4.0`, which was the macOS *feature set* and drifted from the repo release.
+
+### Documentation
+
+- **`README.md`** — versioning note explaining repo release vs per-platform feature set; `VERSION` added to the project tree.
+- **`cc-switch.sh` / `cc-switch.ps1`** — header comments now distinguish the repo release version from the platform feature-set label.
+
 ## [v2.5.0] — 2026-09-24
 
 Shell-startup and prompt release. The macOS path (`cc-switch.sh`, `install.sh`) is unchanged — the `v2.4.0` label in that script still describes the macOS feature set.

@@ -1,6 +1,7 @@
 # cc-switch.ps1 — Claude Code Model Switcher for PowerShell
 # Dot-source: . .\cc-switch.ps1   or add to $PROFILE
 # https://github.com/luyuehm/cc-switch
+# Repo release version: see VERSION (bumped with each git tag)
 
 $script:CC_SETTINGS_PATH = "$env:USERPROFILE\.claude\settings.json"
 $script:CC_EXE_PATH = "$env:USERPROFILE\.local\bin\claude.exe"

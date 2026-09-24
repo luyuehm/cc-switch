@@ -20,6 +20,8 @@
 
 Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch).
 
+**Versioning:** the repo release version lives in [`VERSION`](VERSION) and matches the latest git tag (currently **v2.5.0**). Both installers read it and print it in their banner. The two platform implementations can lag or lead the repo release independently, so each also carries its own *feature set* label — macOS is on feature set **v2.4.0**. See [CHANGELOG.md](CHANGELOG.md).
+
 ---
 
 ## 🍎 macOS (bash/zsh)
@@ -62,7 +64,7 @@ The endpoint file stores the target URL and (for remote) API key. Remote keys li
 
 **Security:** `~/.claude/cpa-endpoints.json` is `chmod 600` and lives outside the repo. Never commit real URLs or keys into this repository.
 
-**New in v2.4.0:** Health checks, CPA auto-discovery (`cc` no args), `cc-run` task scheduling, `cc-config`, `cc-test` — now at parity with Windows/PowerShell version.
+**New in macOS feature set v2.4.0:** Health checks, CPA auto-discovery (`cc` no args), `cc-run` task scheduling, `cc-config`, `cc-test` — now at parity with Windows/PowerShell version.
 
 ## 🪟 Windows / PowerShell (pwsh)
 
@@ -787,6 +789,7 @@ cc-switch/
 ├── install.sh                 # macOS installer (bash, 6-step)
 ├── install.ps1                # Windows/pwsh 5-step installer
 ├── profile-backup.ps1         # Reference pwsh profile: prompt engines + utilities
+├── VERSION                    # Repo release version (matches latest git tag)
 ├── CHANGELOG.md               # Release history (mirrors git tags)
 ├── .env.example               # Secret template
 ├── .gitignore
