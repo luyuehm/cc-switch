@@ -15,6 +15,7 @@
 - **CPA Sync** — Fetch, diff, add/remove models from your CPA proxy
 - **Skill Menu Management** — Audit, hide/show, preset profiles
 - **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
+- **Shell Startup Troubleshooting** — `/shellfix` skill for pyenv lock residue, `rm` PATH-shim hijack, fpath bloat
 
 Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch).
 
@@ -405,6 +406,13 @@ Then in any Claude Code session, use:
 
 The `skills/cc-menu/SKILL.md` defines Claude Code as a trigger skill. After `install.ps1` copies skills, type `/cc-menu` in Claude Code for interactive menu management (audit, hide/show skills, manage commands).
 
+Two skills ship in `skills/` and are installed to `~/.claude/skills/` by `install.sh`:
+
+| Skill | Trigger | Purpose |
+|-------|---------|---------|
+| `cc-menu` | `/cc-menu` | Interactive skill menu management (audit, hide/show, profiles) |
+| `shell-startup-hang-fix` | `/shellfix` | Diagnose shell startup hangs — pyenv lock, `rm` PATH-shim hijack, fpath bloat |
+
 ---
 
 ## Features
@@ -532,6 +540,20 @@ Installed via step [5/5] of the installer:
 cc-theme                    # list 100+ themes
 cc-theme catppuccin         # switch live (preview)
 ```
+
+### 8. Shell Startup Troubleshooting (`/shellfix`)
+
+cc-switch touches `~/.zshrc`, so a slow or hanging shell hurts every `cc` invocation. The `shell-startup-hang-fix` skill ships in `skills/` and covers the three root causes seen in practice:
+
+| Root cause | Symptom | Key check |
+|------------|---------|-----------|
+| **Timeout retry** | Startup hangs a *constant* ~60s | `ls ~/.pyenv/shims/.pyenv-shim` — stale rehash lock |
+| **`rm` PATH-shim hijack** | `🛡️` security-gate spam; tools mis-delete | `whence -p rm` — should be `/bin/rm`, not `~/.local/bin/rm` |
+| **fpath bloat** | 1–3s slower every launch; compdump rebuilt each time | `${#fpath}` vs `${#${(u)fpath[@]}}` |
+
+The first two are usually **mutually causal**: a shimmed `rm` can't release pyenv's lock, so the lock persists and produces the 60s hang. Fix the lock, then confirm `rm` isn't hijacked — otherwise it recurs.
+
+The skill includes a general methodology (measure → timestamp → stderr summary → xtrace → **clean-environment comparison** → bisect → close the evidence chain) that transfers to any "slow startup" investigation. Type `/shellfix` in Claude Code, or read `skills/shell-startup-hang-fix/SKILL.md`.
 
 ---
 
@@ -736,14 +758,17 @@ cc-switch/
 │   └── pwsh-usage-guide.md    # PowerShell usage manual (Chinese)
 ├── .claude/
 │   └── settings.local.json    # Claude Code permission overrides
-└── skills/cc-menu/
-    ├── SKILL.md               # Claude Code skill definition
-    ├── bin/
-    │   ├── cc-menu.sh         # Shell CLI: audit, hide/show skills
-    │   ├── proxy_cpa_cleaner.py     # Anthropic↔OpenAI proxy + smart router
-    │   └── test_and_register_models.py
-    └── docs/
-        └── CPA-MultiModel-Cleaner-Guide.md
+└── skills/
+    ├── cc-menu/
+    │   ├── SKILL.md           # Claude Code skill definition
+    │   ├── bin/
+    │   │   ├── cc-menu.sh         # Shell CLI: audit, hide/show skills
+    │   │   ├── proxy_cpa_cleaner.py     # Anthropic↔OpenAI proxy + smart router
+    │   │   └── test_and_register_models.py
+    │   └── docs/
+    │       └── CPA-MultiModel-Cleaner-Guide.md
+    └── shell-startup-hang-fix/
+        └── SKILL.md           # Shell startup hang diagnosis (/shellfix)
 ```
 
 ---

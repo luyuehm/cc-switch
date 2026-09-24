@@ -1,7 +1,8 @@
 #!/bin/bash
 # install.sh — cc-switch macOS installer
-# Sets up: model switching, health check, CPA auto-discovery, 
-#           task scheduling (cc-run), skill menu management, slash commands
+# Sets up: model switching, health check, CPA auto-discovery,
+#           task scheduling (cc-run), skill menu management, slash commands,
+#           shell startup troubleshooting skill
 # Run: bash install.sh
 # Web: curl -fsSL https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.sh | bash
 
@@ -29,20 +30,32 @@ else
   exit 1
 fi
 
-# [2/6] Copy cc-menu Python scripts (optional advanced features)
+# [2/6] Copy skills (optional advanced features)
 echo ""
-echo "[2/6] Installing cc-menu skill management (optional)..."
-SKILLS_DIR="$HOME/.claude/skills/cc-menu"
-if [[ -d "$SKILLS_DIR" ]]; then
-  echo "  [INFO]   cc-menu skills already exist, skipping..."
+echo "[2/6] Installing skills (optional)..."
+SKILLS_ROOT="$HOME/.claude/skills"
+mkdir -p "$SKILLS_ROOT"
+
+# cc-menu — skill menu management
+if [[ -d "$SKILLS_ROOT/cc-menu" ]]; then
+  echo "  [INFO]   cc-menu skill already exists, skipping..."
+elif [[ -d "$SCRIPT_DIR/skills/cc-menu" ]]; then
+  mkdir -p "$SKILLS_ROOT/cc-menu"
+  cp -R "$SCRIPT_DIR/skills/cc-menu/." "$SKILLS_ROOT/cc-menu"
+  echo "  [OK]  cc-menu skill installed to $SKILLS_ROOT/cc-menu"
 else
-  if [[ -d "$SCRIPT_DIR/skills/cc-menu" ]]; then
-    mkdir -p "$SKILLS_DIR"
-    cp -R "$SCRIPT_DIR/skills/cc-menu/." "$SKILLS_DIR"
-    echo "  [OK]  cc-menu skills installed to $SKILLS_DIR"
-  else
-    echo "  (!)   cc-menu skills not found (optional, skipped)"
-  fi
+  echo "  (!)   cc-menu skill not found (optional, skipped)"
+fi
+
+# shell-startup-hang-fix — shell startup hang troubleshooting
+if [[ -d "$SKILLS_ROOT/shell-startup-hang-fix" ]]; then
+  echo "  [INFO]   shell-startup-hang-fix skill already exists, skipping..."
+elif [[ -d "$SCRIPT_DIR/skills/shell-startup-hang-fix" ]]; then
+  mkdir -p "$SKILLS_ROOT/shell-startup-hang-fix"
+  cp -R "$SCRIPT_DIR/skills/shell-startup-hang-fix/." "$SKILLS_ROOT/shell-startup-hang-fix"
+  echo "  [OK]  shell-startup-hang-fix skill installed to $SKILLS_ROOT/shell-startup-hang-fix"
+else
+  echo "  (!)   shell-startup-hang-fix skill not found (optional, skipped)"
 fi
 
 # [3/6] Copy switch.md slash command
@@ -183,6 +196,7 @@ echo "=== What was installed ==="
 echo "  Core:       ~/.claude/cc-switch.sh"
 echo "  Slash cmd:  ~/.claude/commands/switch.md"
 echo "  Skills:     ~/.claude/skills/cc-menu/"
+echo "              ~/.claude/skills/shell-startup-hang-fix/"
 echo "  Config:     ~/.claude/cc-switch.env"
 echo "  Shell:      .zshrc updated"
 echo ""
