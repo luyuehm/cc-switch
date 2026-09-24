@@ -16,6 +16,7 @@
 - **Skill Menu Management** — Audit, hide/show, preset profiles
 - **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
 - **Shell Startup Troubleshooting** — `/shellfix` skill for pyenv lock residue, `rm` PATH-shim hijack, fpath bloat
+- **PowerShell Startup Troubleshooting** — `/pwshfix` skill for lazy module loading, oh-my-posh network checks, PATH shadowing
 
 Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch).
 
@@ -406,12 +407,15 @@ Then in any Claude Code session, use:
 
 The `skills/cc-menu/SKILL.md` defines Claude Code as a trigger skill. After `install.ps1` copies skills, type `/cc-menu` in Claude Code for interactive menu management (audit, hide/show skills, manage commands).
 
-Two skills ship in `skills/` and are installed to `~/.claude/skills/` by `install.sh`:
+Three skills ship in `skills/` and are installed to `~/.claude/skills/` by the installer:
 
-| Skill | Trigger | Purpose |
-|-------|---------|---------|
-| `cc-menu` | `/cc-menu` | Interactive skill menu management (audit, hide/show, profiles) |
-| `shell-startup-hang-fix` | `/shellfix` | Diagnose shell startup hangs — pyenv lock, `rm` PATH-shim hijack, fpath bloat |
+| Skill | Trigger | Platform | Purpose |
+|-------|---------|----------|---------|
+| `cc-menu` | `/cc-menu` | both | Interactive skill menu management (audit, hide/show, profiles) |
+| `shell-startup-hang-fix` | `/shellfix` | macOS (zsh) | Diagnose shell startup hangs — pyenv lock, `rm` PATH-shim hijack, fpath bloat |
+| `pwsh-startup-hang-fix` | `/pwshfix` | Windows (pwsh) | Diagnose PowerShell startup slowness — eager module import, oh-my-posh network checks, PATH shadowing |
+
+`install.sh` installs the macOS pair (`cc-menu`, `shell-startup-hang-fix`); `install.ps1` installs the Windows pair (`cc-menu`, `pwsh-startup-hang-fix`). The two troubleshooting skills mirror each other — same methodology, different shell.
 
 ---
 
@@ -554,6 +558,20 @@ cc-switch touches `~/.zshrc`, so a slow or hanging shell hurts every `cc` invoca
 The first two are usually **mutually causal**: a shimmed `rm` can't release pyenv's lock, so the lock persists and produces the 60s hang. Fix the lock, then confirm `rm` isn't hijacked — otherwise it recurs.
 
 The skill includes a general methodology (measure → timestamp → stderr summary → xtrace → **clean-environment comparison** → bisect → close the evidence chain) that transfers to any "slow startup" investigation. Type `/shellfix` in Claude Code, or read `skills/shell-startup-hang-fix/SKILL.md`.
+
+### 9. PowerShell Startup Troubleshooting (`/pwshfix`)
+
+The Windows counterpart. `profile-backup.ps1` is a PowerShell profile, so a slow profile degrades every terminal — and pwsh gives you no automatic "which line is slow" report. The `pwsh-startup-hang-fix` skill covers the three root causes measured on Windows + pwsh 7.6.6:
+
+| Root cause | Symptom | Key check |
+|------------|---------|-----------|
+| **Eager module import** | Constant ~0.7s slowdown | `Measure-Command { Import-Module Terminal-Icons }` — ~705ms |
+| **Network self-check** | Slow and *variable* (0.4–1.6s); offline is faster | `Measure-Command { oh-my-posh init pwsh }` — 1618ms → 83ms after `oh-my-posh disable notice; oh-my-posh disable upgrade` |
+| **PATH shadowing** | `--version` isn't the version you installed | `Get-Command oh-my-posh -All` — non-idempotent `$env:Path +=` left an old MSI ahead |
+
+It also documents two pitfalls that cost real time here: `Measure-Command` **means** are misleading under load (interleave A/B and take the **median**), and a `Set-Alias prompt Get-Prompt` / `Set-Alias grep Grep` breaks the command outright because PowerShell command resolution is case-insensitive.
+
+The skill ships a transferable methodology (measure → per-item timing → interleaved A/B median → lazy-load verification → **clean-environment comparison** → bisect → close the evidence chain) plus a ~2ms in-process powerlevel10k look-alike prompt to replace the per-Enter `oh-my-posh.exe` spawn (~90ms). Type `/pwshfix` in Claude Code, or read `skills/pwsh-startup-hang-fix/SKILL.md`.
 
 ---
 
@@ -767,8 +785,10 @@ cc-switch/
     │   │   └── test_and_register_models.py
     │   └── docs/
     │       └── CPA-MultiModel-Cleaner-Guide.md
-    └── shell-startup-hang-fix/
-        └── SKILL.md           # Shell startup hang diagnosis (/shellfix)
+    ├── shell-startup-hang-fix/
+    │   └── SKILL.md           # Shell startup hang diagnosis (/shellfix, macOS/zsh)
+    └── pwsh-startup-hang-fix/
+        └── SKILL.md           # pwsh startup hang diagnosis (/pwshfix, Windows)
 ```
 
 ---

@@ -1,5 +1,6 @@
 # install.ps1 — cc-switch one-click installer
-# Sets up: model switching, OAuth bypass, skill menu management, slash commands
+# Sets up: model switching, OAuth bypass, skill menu management, slash commands,
+#           shell startup troubleshooting skills
 # Run: .\install.ps1
 # Web: irm https://raw.githubusercontent.com/luyuehm/cc-switch/main/install.ps1 | iex
 
@@ -21,9 +22,9 @@ if (-not (Test-Path "$env:USERPROFILE\.claude")) {
 Copy-Item "$scriptDir\cc-switch.ps1" "$env:USERPROFILE\.claude\cc-switch.ps1" -Force
 Write-Host "  [OK]  Core script installed" -ForegroundColor Green
 
-# [2/5] Install Claude Code slash commands + cc-menu skill package
+# [2/5] Install Claude Code slash commands + skill packages
 Write-Host ""
-Write-Host "[2/5] Installing Claude Code commands and cc-menu skills..." -ForegroundColor Yellow
+Write-Host "[2/5] Installing Claude Code commands and skills..." -ForegroundColor Yellow
 
 # Slash command: /switch
 $commandsDir = "$env:USERPROFILE\.claude\commands"
@@ -55,6 +56,18 @@ if (Test-Path "$scriptDir\skills\cc-menu") {
     Write-Host "  [OK]  cc-menu skills installed/updated to $skillsDir" -ForegroundColor Green
 } else {
     Write-Host "  (!)   cc-menu skills not found (optional, skipped)" -ForegroundColor Yellow
+}
+
+# Skill package: /pwshfix (pwsh startup hang diagnosis)
+$pwshFixDir = "$skillsRoot\pwsh-startup-hang-fix"
+if (Test-Path "$scriptDir\skills\pwsh-startup-hang-fix") {
+    if (-not (Test-Path $pwshFixDir)) {
+        New-Item -ItemType Directory -Force -Path $pwshFixDir | Out-Null
+    }
+    Copy-Item "$scriptDir\skills\pwsh-startup-hang-fix\*" $pwshFixDir -Recurse -Force
+    Write-Host "  [OK]  pwsh-startup-hang-fix skill installed/updated to $pwshFixDir" -ForegroundColor Green
+} else {
+    Write-Host "  (!)   pwsh-startup-hang-fix skill not found (optional, skipped)" -ForegroundColor Yellow
 }
 
 # [3/5] Set up .env for secrets
