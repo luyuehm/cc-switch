@@ -167,6 +167,27 @@ CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 | Cache | `C:\Users\<you>\.claude\.cpa-cache.json` |
 | Profile | `$PROFILE` (PowerShell profile) |
 
+### PowerShell Profile Startup & Prompt
+
+`profile-backup.ps1` is the reference PowerShell profile this repo ships. It was profiled and repaired: the original took **1083 ms** to load, the fixed version **~250–350 ms**.
+
+| Fix | What changed | Effect |
+|-----|--------------|--------|
+| **Lazy Terminal-Icons** | `Get-ChildItem` is shadowed by a wrapper that imports the module on first file listing, not at startup | −~705 ms per shell |
+| **No network self-check** | `oh-my-posh disable notice` + `disable upgrade` | `oh-my-posh init` 1618 ms → 83 ms |
+| **Idempotent PATH** | `C:\tools` de-duplicated and moved to the *front* | no unbounded growth; the pinned v29 binary stops losing to an old v25 MSI |
+| **Native prompt engine** | `$PromptEngine` picks `omp` (oh-my-posh) or an in-process powerlevel10k replica | ~90 ms → ~2–23 ms per Enter |
+| **Broken utilities** | `Grep`/`GrepR` parameter binding, `Test-Connection.Latency` on PS7, `Split-Path -LiteralPath -Parent`, `Get-SystemInfo` divide-by-zero, and the aliases that carried arguments or shadowed themselves (incl. `Set-Alias grep Grep`) | functions behave as documented again |
+
+Switch prompt engines live:
+
+```powershell
+$PromptEngine='omp';    . $PROFILE   # oh-my-posh theme (richer)
+$PromptEngine='native'; . $PROFILE   # built-in (fast)
+```
+
+Tuning knobs and the full fix table: [`docs/pwsh-usage-guide.md`](docs/pwsh-usage-guide.md) (Chinese) · methodology: the `/pwshfix` skill.
+
 ---
 
 ## /switch Slash Command (both platforms)
@@ -765,7 +786,8 @@ cc-switch/
 ├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~1516 lines)
 ├── install.sh                 # macOS installer (bash, 6-step)
 ├── install.ps1                # Windows/pwsh 5-step installer
-├── profile-backup.ps1         # Optional pwsh utilities
+├── profile-backup.ps1         # Reference pwsh profile: prompt engines + utilities
+├── CHANGELOG.md               # Release history (mirrors git tags)
 ├── .env.example               # Secret template
 ├── .gitignore
 ├── LICENSE

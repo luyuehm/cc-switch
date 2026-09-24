@@ -11,6 +11,8 @@
 - [核心语法](#核心语法)
 - [快捷键](#快捷键)
 - [自定义](#自定义)
+- [Prompt 引擎与启动优化](#prompt-引擎与启动优化)
+- [已修复的问题](#已修复的问题)
 
 ---
 
@@ -94,14 +96,20 @@ Get-PingStats google.com -Count 50 -Interval 1
 ```
 输出：实时进度、成功率、丢包率、抖动（jitter）
 
+> PowerShell 7 用 `PingReply.Latency` 取延迟（Windows PowerShell 5.1 是 `.RoundtripTime`）；
+> 单次采样不会计算标准差（`jitter` 显示为 `-`）。
+
 ### 文件搜索
 
 #### Grep — 文件内容搜索
 ```powershell
 Grep "TODO" .\src -Include *.py
 
-Grep "error" *.log -IgnoreCase
+Grep "error" .\logs -Include *.log
 ```
+输出：`文件名:行号: 该行内容`。`$Path` 位于位置 1，可省略（默认 `.`）。
+
+> `-IgnoreCase` 是兼容参数，实际不生效——`Select-String` 默认就**不区分大小写**。
 
 #### GrepR / gr — 递归搜索
 ```powershell
@@ -109,6 +117,7 @@ GrepR "function" .\src -Include *.ps1
 
 gr "error" .\logs
 ```
+递归由 `Get-ChildItem -Recurse -File` 提供（`Select-String` 本身没有 `-Recurse`）。
 
 #### Get-FileSizeSummary — 目录大小
 ```powershell
@@ -415,6 +424,93 @@ $PROFILE                     # PowerShell profile 路径
 
 ---
 
+## Prompt 引擎与启动优化
+
+`profile-backup.ps1` 内置两种 prompt 引擎，可用变量随时切换：
+
+| 引擎 | 渲染方式 | 每次回车开销 | 说明 |
+|------|----------|--------------|------|
+| `native`（默认） | 纯 PowerShell，进程内 | ~2–23 ms | 复刻 `powerlevel10k_rainbow` 外观 |
+| `omp` | 每次 spawn `oh-my-posh.exe` | ~90 ms | 主题丰富，可换任意主题 |
+
+```powershell
+$PromptEngine='omp';    . $PROFILE   # 切到 oh-my-posh
+$PromptEngine='native'; . $PROFILE   # 切回原生（快）
+Get-Prompt                            # 查看当前引擎（别名 pwsh-help）
+```
+
+> 变量只在「未设置」时取默认值（`if (-not $PromptEngine)`），所以重新 source profile
+> 不会覆盖你在运行时做的切换。
+
+### native 引擎渲染效果
+
+```
+╭─   D:\repo  main ✔      1.2s   ✔   15:04:05      ─╮
+╰─
+```
+
+- 段与配色逐字节对齐 `powerlevel10k_rainbow.omp.json`：OS `#d3d7cf`、路径 `#3465a4` / 文字 `#e4e4e4`、干净 git `#4e9a06`、脏 git `#c4a000`、执行耗时 `#c4a000`、状态 `#000000`（失败 `#cc2222`）、时间 `#d3d7cf`。
+- 分支直接读 `.git/HEAD`（~2 ms），**不 spawn git**；脏计数需要 `git status`，但**按 TTL 缓存**（默认 2 秒），因为大仓库跑一次 `git status` 约 130 ms。
+- 第 2 行的 `─╯` 用 ESC7 / ESC8（保存 / 恢复光标）绘制，**不移动真实光标**，最后一行仍是干净的 `╰─ `，PSReadLine 行编辑不受影响（配合 `Set-PSReadLineOption -ExtraPromptLineCount 1`）。
+- 中文按 **2 列**计算宽度，右对齐不会错位。
+
+### 可调参数（native 引擎）
+
+```powershell
+$script:GitStatusMode = 'cached'   # 'off' | 'cached' | 'always'
+$script:GitStatusTtl  = 2.0        # git status 刷新间隔（秒）
+$script:ExecTimeMinMs = 500        # 执行耗时低于此值不显示
+$script:ShowGitStash  = $true      # 是否显示 stash 数
+```
+
+### 启动优化
+
+| 优化 | 手段 | 效果 |
+|------|------|------|
+| Terminal-Icons 惰性加载 | 影子 `Get-ChildItem`，首次列目录才 `Import-Module` | 省 ~705 ms |
+| 关闭 omp 联网自检 | `oh-my-posh disable notice` + `disable upgrade` | `init` 1618 ms → 83 ms |
+| PATH 幂等归一 | 去重 + 前置 `C:\tools` | 消除无界增长与旧版遮蔽 |
+
+```powershell
+# 验证惰性加载：启动时 0 个模块，首次 ls 后 1 个
+(Get-Module).Count; ls > $null; (Get-Module).Count
+```
+
+---
+
+## 已修复的问题
+
+以下问题在 profile 中已修复，列在这里便于回溯。完整排查方法论见
+[`skills/pwsh-startup-hang-fix/SKILL.md`](../skills/pwsh-startup-hang-fix/SKILL.md)。
+
+| 现象 | 根因 | 修法 |
+|------|------|------|
+| `grep` 和 `Grep` 一起失效 | `Set-Alias grep Grep` 是自指遮蔽（命令名不区分大小写） | 删掉别名；函数本身响应两种拼写 |
+| `Grep "x" .\src` 第二个参数不生效 | `$Path` 缺 `Position` | `[Parameter(Position=1)]` |
+| `GrepR` 必报错 | 给 `Select-String` 传了它没有的 `-Recurse` | 改为 `Get-ChildItem -Recurse -File \| Select-String` |
+| PS7 上 `Get-PingStats` 延迟全为 0 | PS7 用 `.Latency`（`.RoundtripTime` 是旧版名字） | 读 `.Latency`；单样本不算标准差 |
+| `Split-Path -LiteralPath X -Parent` 报参数集冲突 | `LiteralPathSet` 没有 `-Parent` | `[IO.Path]::GetDirectoryName()` |
+| `[Console]::WindowWidth` 报「句柄无效」 | 无控制台句柄时不可用 | `$Host.UI.RawUI.WindowSize.Width` |
+| `Get-SystemInfo` 除零 | 0 容量挂载点参与了百分比计算 | 过滤 `Used + Free -gt 0` |
+| `ll` / `lsa` 报错 | `Set-Alias ll 'Get-ChildItem -Force'`——别名不能带参数 | 改为函数 |
+| `prompt` 被搞坏 | `Set-Alias prompt Get-Prompt`——`prompt` 是保留函数名 | 删除别名 |
+| 嵌套 shell 里 PATH 无界增长 | `$env:Path += ";C:\tools"` 非幂等 | 去重 + 前置 |
+| git 报 `unknown revision` | 把哈希表当字面量传给了 git | 传字符串 `HEAD...origin/HEAD` |
+
+### 修复前后基线（Windows + PowerShell 7.6.6）
+
+| 指标 | 修复前 | 修复后 |
+|------|--------|--------|
+| profile 启动耗时 | 1083 ms | ~250–350 ms |
+| Terminal-Icons 启动开销 | ~705 ms | 0（首次 `ls` 才加载） |
+| `oh-my-posh init` | 1618 ms | ~83 ms |
+| 每次回车 prompt 开销 | ~90 ms | ~2–23 ms |
+| 启动时模块数 | 1+ | 0 |
+| PATH 中 `C:\tools` 份数 | 无界增长 | 恒为 1 |
+| `oh-my-posh --version` | v25.16.1（被旧版遮蔽） | v29.15.1 |
+
+---
+
 ## 常见问题
 
 ### Q: 如何列出所有函数？
@@ -452,6 +548,19 @@ Get-Alias
 Get-Alias | Where-Object Name -like "g*"
 ```
 
+### Q: 终端启动慢 / 想换 prompt 风格？
+```powershell
+# 先量，再猜：逐个测可疑项的独立开销
+Measure-Command { Import-Module Terminal-Icons }    | % TotalMilliseconds
+Measure-Command { oh-my-posh init pwsh | Out-Null } | % TotalMilliseconds
+
+# 切换 prompt 引擎
+$PromptEngine='omp';    . $PROFILE   # 丰富（oh-my-posh 主题）
+$PromptEngine='native'; . $PROFILE   # 快（内置 prompt）
+```
+> 注意：机器有负载时 `Measure-Command` 的**均值会失真**，应交替测新旧并取**中位数**。
+> 完整排查步骤见 [`docs` 的「Prompt 引擎与启动优化」](#prompt-引擎与启动优化) 与 `/pwshfix` 技能。
+
 ---
 
 ## 快速参考卡片
@@ -459,7 +568,7 @@ Get-Alias | Where-Object Name -like "g*"
 ### 最常用命令
 ```
 . $PROFILE       重新加载 profile
-Get-Prompt       查看所有函数/别名
+Get-Prompt       查看所有函数/别名（别名 pwsh-help）
 gs               Git status
 Gc "msg"         Git commit
 pro/obs/pub      目录跳转
@@ -467,15 +576,18 @@ Get-NetworkStatus 网络诊断
 Test-Port        端口检测
 Top-Processes    进程排名
 Get-SystemInfo   系统信息
+$PromptEngine='omp'; . $PROFILE   切换 prompt 引擎
 ```
 
 ### 最常用别名
 ```
 ls             Get-ChildItem
 cat            Get-Content
-grep/gr        Select-String
+grep           Grep（函数，包装 Select-String）
+gr             GrepR（递归搜索）
 gs             Get-GitStatus
 vi/vim         code (VS Code)
+pwsh-help      Get-Prompt（函数/别名菜单）
 ```
 
 ---
