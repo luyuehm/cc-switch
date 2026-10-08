@@ -1,3 +1,8 @@
+# Fix console encoding: force UTF-8 to avoid garbled Chinese/symbols
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+
 # ================================================================
 # PATH normalisation (runs for BOTH prompt engines)
 # ================================================================

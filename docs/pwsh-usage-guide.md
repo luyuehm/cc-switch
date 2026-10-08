@@ -592,4 +592,32 @@ pwsh-help      Get-Prompt（函数/别名菜单）
 
 ---
 
+
+---
+
+## 终端乱码修复（UTF-8 + Nerd Font）
+
+PowerShell 7 (pwsh) 默认在 Windows 控制台使用 GBK(936) 编码，而 cc-switch 及 oh-my-posh 主题使用 UTF-8 符号（如 `—`、Powerline/Nerd Font 图标），导致控制台输出乱码（`�?` / `??`）。
+
+### 修复 1：profile 中强制 UTF-8 编码
+
+在 `$PROFILE` 顶部加入：
+
+```powershell
+# Fix console encoding: force UTF-8 to avoid garbled Chinese/symbols
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
+```
+
+### 修复 2：安装 Nerd Font 字体
+
+oh-my-posh 的图标需要终端字体支持 Nerd Font，否则显示为方块/占位符：
+
+1. 在 https://www.nerdfonts.com/font-downloads 下载 MesloLGS Nerd Font Mono（`MesloLGSNerdFontMono-Regular.ttf`）
+2. 将字体文件复制到 `%LOCALAPPDATA%\Microsoft\Windows\Fonts`，或直接双击字体文件安装（为当前用户安装）
+3. Windows Terminal → 设置 → 配置文件 → 默认 → 外观 → 字体 → 选择 `MesloLGS Nerd Font Mono`
+
+完成以上两步后，重启 Windows Terminal 即可正常显示中文、图标和特殊符号。
+
 *Created by Ant Rich — PowerShell 7.6+*

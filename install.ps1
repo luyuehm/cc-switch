@@ -113,6 +113,11 @@ $ccBlock = @'
 # >>> cc-switch — Claude Code Model + Menu Manager
 # https://github.com/luyuehm/cc-switch
 
+
+# Fix console encoding: force UTF-8 to avoid garbled Chinese/symbols
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 | Out-Null
 # Oh My Posh (prompt theme)
 $ohMyPosh = "C:\tools\oh-my-posh.exe"
 $poshTheme = "C:\tools\oh-my-posh\themes\powerlevel10k_rainbow.omp.json"
