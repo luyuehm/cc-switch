@@ -1,11 +1,67 @@
 # cc-switch.sh — Claude Code Model Switcher for macOS (zsh/bash)
 # Source: . ./cc-switch.sh   or add to ~/.zshrc
 # https://github.com/luyuehm/cc-switch
-# Repo release version: see VERSION (bumped with each git tag)
-# macOS feature set v2.4.0 — health check, CPA auto-discovery, cc-run, cc-config, cc-test
+# v2.4.0 — Health check, CPA auto-discovery, cc-run, cc-config, cc-test
 
-CC_SETTINGS_PATH="$HOME/.claude/settings.json"
-CC_ENV_PATH="$HOME/.claude/cc-switch.env"
+CC_SETTINGS_PATH="${CC_SETTINGS_PATH:-$HOME/.claude/settings.json}"
+CC_ENV_PATH="${CC_ENV_PATH:-$HOME/.claude/cc-switch.env}"
+
+# ─── Model identity (RIC-1845) ───
+# The provider's raw ID is the source of truth. `a-`-prefixed IDs (e.g.
+# a-deepseek-flash) are FIRST-CLASS models, not aliases of the bare name:
+# they are fetched, stored, selected, health-checked and removed under their
+# raw ID. A canonical/alias mapping is applied ONLY when the raw ID has an
+# explicit entry in CC_ALIAS_FILE — an unconfirmed alias is never normalized,
+# and no model is ever dropped because of its prefix.
+CC_ALIAS_FILE="${CC_ALIAS_FILE:-$HOME/.claude/cc-model-aliases.json}"
+# Health evidence log (JSONL). Set CC_HEALTH_LOG="" to disable.
+CC_HEALTH_LOG="${CC_HEALTH_LOG:-$HOME/.claude/cc-health.log}"
+
+# Parse a CPA /v1/models response (JSON on stdin) into raw IDs, one per line.
+# No prefix filtering, no alias rewrite, no collapsing of distinct IDs.
+__cc_parse_cpa_response() {
+  python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if isinstance(d, dict) and isinstance(d.get('data'), list):
+    models=[m.get('id') for m in d['data'] if isinstance(m, dict) and m.get('id')]
+elif isinstance(d, list):
+    models=[m.get('id') if isinstance(m, dict) else None for m in d]
+else:
+    models=[]
+seen=set()
+for m in sorted({str(x) for x in models if x}):
+    if m in seen:
+        continue
+    seen.add(m)
+    print(m)
+"
+}
+
+# Map raw IDs (one per line on stdin) to '<raw_id>\t<canonical_id>' pairs.
+# canonical_id == raw_id unless a confirmed alias exists in CC_ALIAS_FILE.
+__cc_model_identity() {
+  CC_ALIAS_FILE="$CC_ALIAS_FILE" python3 -c "
+import json,os,sys
+alias={}
+p=os.environ.get('CC_ALIAS_FILE','')
+if p and os.path.isfile(p):
+    try:
+        raw=json.load(open(p))
+        if isinstance(raw,dict):
+            alias={str(k):str(v) for k,v in raw.items() if isinstance(v,str) and v}
+    except Exception:
+        alias={}
+for line in sys.stdin:
+    m=line.strip()
+    if not m:
+        continue
+    print('%s\t%s' % (m, alias.get(m, m)))
+"
+}
 
 # ─── In-memory health cache (TTL: 60s) ───
 # Format: __cc_health_cache[model]="<epoch_timestamp>:<healthy|unhealthy>"
@@ -67,16 +123,116 @@ __cc_find_claude() {
 
 __cc_read_settings() {
   if [[ ! -f "$CC_SETTINGS_PATH" ]]; then
-    mkdir -p "$(dirname "$CC_SETTINGS_PATH")"
-    echo '{"availableModels":[],"env":{}}' > "$CC_SETTINGS_PATH"
-  elif ! python3 -c "import json; json.load(open('$CC_SETTINGS_PATH'))" 2>/dev/null; then
-    echo '{"availableModels":[],"env":{}}' > "$CC_SETTINGS_PATH"
+    local dir; dir="$(dirname "$CC_SETTINGS_PATH")"
+    [[ -d "$dir" ]] || mkdir -p "$dir" || return 1
+    printf '{"availableModels":[],"env":{}}\n' > "$CC_SETTINGS_PATH" || return 1
+  # RIC-1851: never overwrite an existing settings file just because it failed to
+  # parse — that would silently delete every user model. Report it instead.
+  elif ! CC_SETTINGS_PATH="$CC_SETTINGS_PATH" python3 -c "
+import json,os,sys
+try:
+    json.load(open(os.environ['CC_SETTINGS_PATH']))
+except Exception as e:
+    sys.stderr.write('cc-switch: %s is not valid JSON, refusing to overwrite: %s\n'
+                     % (os.environ['CC_SETTINGS_PATH'], e))
+    sys.exit(1)
+" 2>/dev/null; then
+    echo "Error: '$CC_SETTINGS_PATH' is not valid JSON — refusing to overwrite it." >&2
+    echo "       Restore a backup or fix the file, then retry." >&2
+    return 1
   fi
   cat "$CC_SETTINGS_PATH"
 }
 
 __cc_save_settings() {
-  cat > "$CC_SETTINGS_PATH"
+  # RIC-1845: persist model IDs exactly as given. No 'a-' stripping, no silent
+  # drops, no alias rewrite — a-deepseek-flash and deepseek-flash are distinct
+  # entries. Existing values that are already bare are left untouched.
+  #
+  # RIC-1851: CC_SETTINGS_PATH is a plain shell variable (line 6) that is never
+  # exported, so the child Python could not see it in os.environ and died with
+  # KeyError:'CC_SETTINGS_PATH' — after which callers printed success anyway.
+  # Pass it explicitly, and treat it as mandatory: an empty path is a hard error,
+  # never a silent skip.
+  local __cc_save_rc=0
+  CC_SETTINGS_PATH="$CC_SETTINGS_PATH" python3 -c "
+import json,sys,os
+
+path = os.environ.get('CC_SETTINGS_PATH') or ''
+if not path:
+    sys.stderr.write('cc-switch: CC_SETTINGS_PATH is not set — cannot save settings\n')
+    sys.exit(2)
+
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write('cc-switch: refusing to save invalid JSON: %s\n' % e)
+    sys.exit(1)
+
+def keep(m):
+    # Only reject empty/non-string entries; every concrete model ID is valid.
+    if not isinstance(m, str):
+        return None
+    m = m.strip()
+    return m or None
+
+# env: model-valued keys
+for k, v in list(d.get('env', {}).items()):
+    if 'MODEL' in k and isinstance(v, str):
+        r = keep(v)
+        if r is not None:
+            d['env'][k] = r
+for k in ('model',):
+    if isinstance(d.get(k), str):
+        r = keep(d[k])
+        if r is not None:
+            d[k] = r
+# fallbackModel: string or list — dedupe exact duplicates only
+fb = d.get('fallbackModel')
+if isinstance(fb, str):
+    r = keep(fb)
+    if r is not None:
+        d['fallbackModel'] = r
+elif isinstance(fb, list):
+    seen = set(); out = []
+    for m in fb:
+        r = keep(m)
+        if r is None or r in seen:
+            continue
+        seen.add(r); out.append(r)
+    d['fallbackModel'] = out
+# availableModels: keep every distinct ID, sorted for stable diffs
+am = d.get('availableModels')
+if isinstance(am, list):
+    seen = set(); uniq = []
+    for m in am:
+        r = keep(m)
+        if r is None or r in seen:
+            continue
+        seen.add(r); uniq.append(r)
+    d['availableModels'] = sorted(uniq)
+# taskModels: values are raw model IDs; leave them alone
+# Atomic write: a crash or full disk must not truncate the live settings file.
+tmp = path + '.tmp-cc-%d' % os.getpid()
+try:
+    with open(tmp, 'w') as f:
+        json.dump(d, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+    os.replace(tmp, path)
+except Exception as e:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    sys.stderr.write('cc-switch: failed to write %s: %s\n' % (path, e))
+    sys.exit(3)
+" || __cc_save_rc=$?
+
+  if [[ "$__cc_save_rc" -ne 0 ]]; then
+    echo "Error: failed to save settings to $CC_SETTINGS_PATH (exit $__cc_save_rc)" >&2
+    return "$__cc_save_rc"
+  fi
+  return 0
 }
 
 __cc_get_current_model() {
@@ -145,14 +301,38 @@ __cc_resolve_endpoint() {
 }
 
 # ─── Health Check ───
-# Ping a model via POST /v1/messages to verify it's responsive.
+# Ping a model via POST /v1/messages using its RAW ID to verify it's responsive.
+# Every probe — a- prefixed or not — takes the same path; the prefix is never a
+# reason to skip. Evidence (raw_id, http_status, error_class) is appended to
+# CC_HEALTH_LOG as JSONL when a status is observed.
 # Uses in-memory cache with 60s TTL.
 # Returns 0 if healthy, 1 if unhealthy.
+__cc_health_log() {
+  local model_id="$1" http_status="$2" error_class="$3" detail="$4"
+  [[ -z "${CC_HEALTH_LOG:-}" ]] && return 0
+  CC_HEALTH_LOG="$CC_HEALTH_LOG" python3 -c "
+import json,os,time,sys
+rec={'ts':time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),
+     'raw_id':sys.argv[1],'http_status':sys.argv[2],
+     'error_class':sys.argv[3],'detail':sys.argv[4][:200]}
+try:
+    with open(os.environ['CC_HEALTH_LOG'],'a') as f:
+        f.write(json.dumps(rec,ensure_ascii=False)+'\n')
+except Exception:
+    pass
+" "$model_id" "$http_status" "$error_class" "$detail" 2>/dev/null || true
+}
+
 __cc_test_model_health() {
   local model="$1"
   local timeout_sec="${2:-10}"
   local now
   now="$(date +%s)"
+
+  # Last observed probe evidence (read by cc-sync --health).
+  CC_LAST_HEALTH_STATUS=""
+  CC_LAST_HEALTH_CLASS=""
+  CC_LAST_HEALTH_DETAIL=""
 
   # Check cache (defensive: skip if format is corrupt — no arithmetic needed)
   local cached="${__cc_health_cache[$model]:-}"
@@ -162,6 +342,8 @@ __cc_test_model_health() {
     # Only use cache if timestamp is numeric and value is valid
     if [[ "$cache_ts" =~ ^[0-9]+$ ]] && [[ "$cache_val" =~ ^(healthy|unhealthy)$ ]]; then
       if [[ $(( now - cache_ts )) -lt $CC_HEALTH_CACHE_TTL ]]; then
+        CC_LAST_HEALTH_STATUS="cache"
+        CC_LAST_HEALTH_CLASS="$cache_val"
         [[ "$cache_val" == "healthy" ]] && return 0 || return 1
       fi
     fi
@@ -178,6 +360,9 @@ __cc_test_model_health() {
 
   if [[ -z "$base_url" || -z "$api_key" ]]; then
     __cc_health_cache[$model]="$now:unhealthy"
+    __cc_health_log "$model" "000" "no_endpoint" "base_url or api_key missing"
+    CC_LAST_HEALTH_STATUS="000"
+    CC_LAST_HEALTH_CLASS="no_endpoint"
     return 1
   fi
 
@@ -190,24 +375,54 @@ __cc_test_model_health() {
 EOF
 )
 
-  local response
-  response="$(curl -s --connect-timeout 5 --max-time "$timeout_sec" \
+  local response http_code
+  http_code="$(curl -s --connect-timeout 5 --max-time "$timeout_sec" \
+    -o /tmp/.cc_health_body.$$ -w '%{http_code}' \
     -X POST "$messages_url" \
     -H "Authorization: Bearer $api_key" \
     -H "Content-Type: application/json" \
     -H "anthropic-version: 2023-06-01" \
-    -d "$body" 2>/dev/null)" || {
+    -d "$body" 2>/dev/null)" || http_code="000"
+  response="$(cat /tmp/.cc_health_body.$$ 2>/dev/null)"
+  rm -f /tmp/.cc_health_body.$$
+
+  if [[ "$http_code" == "000" ]]; then
     __cc_health_cache[$model]="$now:unhealthy"
+    __cc_health_log "$model" "000" "transport" "curl failed or timed out"
+    CC_LAST_HEALTH_STATUS="000"
+    CC_LAST_HEALTH_CLASS="transport"
     return 1
-  }
+  fi
+
+  # Classify by HTTP status first, then by body.
+  local klass=""
+  case "$http_code" in
+    2[0-9][0-9]) ;;
+    401|403) klass="auth" ;;
+    404) klass="not_found" ;;
+    429) klass="rate_limit" ;;
+    5[0-9][0-9]) klass="upstream" ;;
+    *) klass="http_$http_code" ;;
+  esac
 
   # Check for hidden error body (some proxies return 200 with error JSON)
-  if echo "$response" | grep -qiE '"error"|"overloaded"|"unavailable"'; then
+  if [[ -z "$klass" ]] && echo "$response" | grep -qiE '"error"|"overloaded"|"unavailable"'; then
+    klass="error_body"
+  fi
+
+  if [[ -n "$klass" ]]; then
     __cc_health_cache[$model]="$now:unhealthy"
+    __cc_health_log "$model" "$http_code" "$klass" "$response"
+    CC_LAST_HEALTH_STATUS="$http_code"
+    CC_LAST_HEALTH_CLASS="$klass"
+    CC_LAST_HEALTH_DETAIL="$response"
     return 1
   fi
 
   __cc_health_cache[$model]="$now:healthy"
+  __cc_health_log "$model" "$http_code" "" ""
+  CC_LAST_HEALTH_STATUS="$http_code"
+  CC_LAST_HEALTH_CLASS="ok"
   return 0
 }
 
@@ -236,6 +451,8 @@ __cc_select_healthy_model() {
 }
 
 # ─── CPA Model Fetch ───
+# Emits provider raw IDs verbatim (RIC-1845). 'a-' IDs are kept as first-class
+# entries; nothing is mapped to a bare name and nothing is filtered by prefix.
 __cc_fetch_cpa_models() {
   local ep_raw
   ep_raw="$(__cc_resolve_endpoint)"
@@ -249,21 +466,7 @@ __cc_fetch_cpa_models() {
     -H "Authorization: Bearer $api_key" \
     -H "Content-Type: application/json")" || return 1
 
-  echo "$response" | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    if isinstance(d, dict) and 'data' in d:
-        models=[m['id'] for m in d['data'] if m.get('id')]
-    elif isinstance(d, list):
-        models=[m.get('id','') for m in d if m.get('id')]
-    else:
-        models=[]
-    for m in sorted(models):
-        print(m)
-except Exception as e:
-    sys.exit(1)
-" 2>/dev/null
+  echo "$response" | __cc_parse_cpa_response || return 1
 }
 
 # ─── Model Categorization (Python helper, used by __cc_auto_assign and menu) ───
@@ -272,17 +475,23 @@ __cc_categorize_models_py() {
 import sys
 models = [l.strip() for l in sys.stdin if l.strip()]
 
+def kind(m):
+    # Categorization only: an 'a-' prefix is a serving-route marker, not a
+    # different family. The raw ID itself is never rewritten.
+    return m[2:] if m.startswith('a-') and len(m) > 2 else m
+
 def get_cat(m):
-    if m.startswith('gpt-') or m.startswith('o'): return 'GPT'
-    if m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): return 'Claude'
-    if m.startswith('deepseek'): return 'DeepSeek'
-    if m.startswith('qwen'): return 'Qwen'
-    if m.startswith('grok'): return 'Grok'
-    if m.startswith('kimi') or m.startswith('moonshot'): return 'Moonshot'
-    if m.startswith('llama'): return 'Llama'
-    if m.startswith('mistral') or m.startswith('mixtral'): return 'Mistral'
-    if m.startswith('gemin'): return 'Gemini'
-    if 'step' in m.lower(): return 'Stepfun'
+    k = kind(m)
+    if k.startswith('gpt-') or k.startswith('o'): return 'GPT'
+    if k.startswith('claude-') or k.startswith('sonnet') or k.startswith('haiku'): return 'Claude'
+    if k.startswith('deepseek'): return 'DeepSeek'
+    if k.startswith('qwen'): return 'Qwen'
+    if k.startswith('grok'): return 'Grok'
+    if k.startswith('kimi') or k.startswith('moonshot'): return 'Moonshot'
+    if k.startswith('llama'): return 'Llama'
+    if k.startswith('mistral') or k.startswith('mixtral'): return 'Mistral'
+    if k.startswith('gemin'): return 'Gemini'
+    if 'step' in k.lower(): return 'Stepfun'
     return 'Other'
 
 groups = {}
@@ -290,8 +499,12 @@ for m in models:
     cat = get_cat(m)
     groups.setdefault(cat, []).append(m)
 
+def sort_key(m):
+    # Bare IDs first, then 'a-' routes; preserves pre-RIC-1845 probe order.
+    return (m.startswith('a-'), m)
+
 for cat in sorted(groups):
-    for m in sorted(groups[cat]):
+    for m in sorted(groups[cat], key=sort_key):
         print(f'{cat}|{m}')
 "
 }
@@ -519,7 +732,7 @@ d['availableModels']=sorted(set(models))
 d['taskModels']=$tm_json
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-  echo "$json" | __cc_save_settings
+  echo "$json" | __cc_save_settings || return 1
 
   for task in code reason quick image default; do
     [[ -n "${assign[$task]:-}" ]] && echo "${task}|${assign[$task]}"
@@ -538,18 +751,25 @@ __cc_categorize_models() {
 import sys
 models = [l.strip() for l in sys.stdin if l.strip()]
 
+def kind(m):
+    return m[2:] if m.startswith('a-') and len(m) > 2 else m
+
 def get_cat(m):
-    if m.startswith('gpt-') or m.startswith('o'): return 'GPT'
-    if m.startswith('claude-') or m.startswith('sonnet') or m.startswith('haiku'): return 'Claude'
-    if m.startswith('deepseek'): return 'DeepSeek'
-    if m.startswith('qwen'): return 'Qwen'
-    if m.startswith('grok'): return 'Grok'
-    if m.startswith('kimi') or m.startswith('moonshot'): return 'Moonshot'
-    if m.startswith('llama'): return 'Llama'
-    if m.startswith('mistral') or m.startswith('mixtral'): return 'Mistral'
-    if m.startswith('gemin'): return 'Gemini'
-    if 'step' in m.lower(): return 'Stepfun'
+    k = kind(m)
+    if k.startswith('gpt-') or k.startswith('o'): return 'GPT'
+    if k.startswith('claude-') or k.startswith('sonnet') or k.startswith('haiku'): return 'Claude'
+    if k.startswith('deepseek'): return 'DeepSeek'
+    if k.startswith('qwen'): return 'Qwen'
+    if k.startswith('grok'): return 'Grok'
+    if k.startswith('kimi') or k.startswith('moonshot'): return 'Moonshot'
+    if k.startswith('llama'): return 'Llama'
+    if k.startswith('mistral') or k.startswith('mixtral'): return 'Mistral'
+    if k.startswith('gemin'): return 'Gemini'
+    if 'step' in k.lower(): return 'Stepfun'
     return 'Other'
+
+def sort_key(m):
+    return (m.startswith('a-'), m)
 
 cats = {}
 for m in models:
@@ -561,10 +781,10 @@ verbose = $verbose
 for cat in sorted(cats.keys(), key=lambda c: order.get(c,99)):
     if verbose:
         print(f'  [{cat}]')
-        for m in sorted(cats[cat]):
+        for m in sorted(cats[cat], key=sort_key):
             print(f'    {m}')
     else:
-        print(f'{cat}: ' + '  '.join(sorted(cats[cat])))
+        print(f'{cat}: ' + '  '.join(sorted(cats[cat], key=sort_key)))
 "
 }
 
@@ -656,7 +876,9 @@ d['availableModels']=sorted(existing)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
 
-  echo "$json" | __cc_save_settings
+  if ! echo "$json" | __cc_save_settings; then
+    return 1
+  fi
 
   echo "OK: Model switched"
   echo "  Old: $old_model"
@@ -829,7 +1051,9 @@ if not d.get('modelOverrides',{}):
     d.pop('modelOverrides',None)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-  echo "$json2" | __cc_save_settings
+  if ! echo "$json2" | __cc_save_settings; then
+    return 1
+  fi
 
   local claude_bin
   claude_bin="$(__cc_find_claude)"
@@ -963,7 +1187,7 @@ if 'taskModels' not in d or not isinstance(d.get('taskModels'),dict):
 d['taskModels']['$task']='$model'
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-    echo "$json" | __cc_save_settings
+    echo "$json" | __cc_save_settings || return 1
     echo "[OK]  Task '$task' → $model"
     echo "  Use 'cc-run $task' to launch with this model."
     return 0
@@ -1089,7 +1313,7 @@ remove_set=set('''$remove_list'''.strip().split('\n'))
 d['availableModels']=[m for m in d.get('availableModels',[]) if m not in remove_set]
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-    echo "$json" | __cc_save_settings
+    echo "$json" | __cc_save_settings || return 1
     echo "Done. Run 'cc-sync' to re-fetch from CPA."
   fi
 
@@ -1169,15 +1393,23 @@ cc-endpoint() {
 }
 
 # === CPA SYNC ===
+# RIC-1845: the provider's raw model ID is the unit of comparison everywhere in
+# this function. a-deepseek-flash and deepseek-flash are two independent entries
+# with independent existence, selection and removal. A canonical_id is shown for
+# context only and never replaces the raw ID.
 cc-sync() {
-  local list_mode=0 force=0 remove=0 reassign=0
+  local list_mode=0 raw_list_mode=0 force=0 remove=0 reassign=0 health_mode=0
+  local remove_id=""
 
   for arg in "$@"; do
     case "$arg" in
       -List|--list) list_mode=1 ;;
+      -ListRaw|--list-raw) raw_list_mode=1 ;;
       -Force|--force) force=1 ;;
       -Remove|--remove) remove=1 ;;
       -Reassign|--reassign) reassign=1 ;;
+      -Health|--health) health_mode=1 ;;
+      -Id=*|--id=*) remove_id="${arg#*=}" ;;
     esac
   done
 
@@ -1198,7 +1430,7 @@ cc-sync() {
   fi
 
   echo "Fetching models from CPA..."
-  echo "  $cpa_url"
+  echo "  ${cpa_url%/v1/models}"
 
   local response
   response="$(curl -s --connect-timeout 5 --max-time 15 "$cpa_url" \
@@ -1208,37 +1440,58 @@ cc-sync() {
     return 1
   }
 
+  # Raw provider IDs, verbatim — no alias rewrite, no prefix filtering.
   local cpa_models
-  cpa_models="$(echo "$response" | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    if isinstance(d, dict) and 'data' in d:
-        models=[m['id'] for m in d['data'] if m.get('id')]
-    elif isinstance(d, list):
-        models=[m.get('id','') for m in d if m.get('id')]
-    else:
-        models=[]
-    for m in sorted(models):
-        print(m)
-except Exception as e:
-    sys.exit(1)
-")" || {
+  cpa_models="$(echo "$response" | __cc_parse_cpa_response)" || {
     echo "Error: unexpected CPA response format." >&2
     return 1
   }
+  [[ -z "$cpa_models" ]] && { echo "Error: CPA returned no models." >&2; return 1; }
 
   local count
   count="$(echo "$cpa_models" | wc -l | tr -d ' ')"
   echo "  Got $count models from CPA"
+
+  # Raw + canonical identity view (raw_id is authoritative).
+  local identities
+  identities="$(echo "$cpa_models" | __cc_model_identity)"
+
+  local cpa_a_count
+  cpa_a_count="$(echo "$cpa_models" | grep -c '^a-' || true)"
+
+  if [[ "$raw_list_mode" -eq 1 ]]; then
+    echo ""
+    echo "=== CPA Models — raw ID / canonical ID ($count) ==="
+    echo "$identities" | while IFS=$'\t' read -r raw canon; do
+      [[ -z "$raw" ]] && continue
+      if [[ "$raw" == "$canon" ]]; then
+        printf '  %s\n' "$raw"
+      else
+        printf '  %s  (canonical: %s)\n' "$raw" "$canon"
+      fi
+    done
+    echo ""
+    echo "--- $count models (${cpa_a_count} with 'a-' prefix) ---"
+    return 0
+  fi
 
   if [[ "$list_mode" -eq 1 ]]; then
     echo ""
     echo "=== CPA Models ($count) ==="
     echo "$cpa_models" | while IFS= read -r m; do echo "  $m"; done
     echo ""
-    echo "--- $count models ---"
+    echo "--- $count models (${cpa_a_count} with 'a-' prefix) ---"
     return 0
+  fi
+
+  if [[ "$health_mode" -eq 1 ]]; then
+    local health_ids="$identities"
+    if [[ -n "$remove_id" ]]; then
+      # --health --id=<raw_id>[,<raw_id>...] probes just those raw IDs.
+      health_ids="$(printf '%s\n' "$remove_id" | tr ',' '\n' | sed '/^$/d')"
+    fi
+    __cc_sync_health_report "$health_ids"
+    return $?
   fi
 
   local json
@@ -1255,6 +1508,8 @@ for m in sorted(d.get('availableModels',[])):
   local new_models=""
   local gone_models=""
 
+  # Membership tests are exact-string against the RAW CPA ID set. A model that
+  # exists locally only under a bare name is NOT satisfied by an 'a-' ID in CPA.
   while IFS= read -r m; do
     [[ -z "$m" ]] && continue
     if ! echo "$local_models" | grep -Fxq "$m"; then
@@ -1271,14 +1526,49 @@ for m in sorted(d.get('availableModels',[])):
 
   local new_count="$(echo "$new_models" | sed '/^$/d' | wc -l | tr -d ' ')"
   local gone_count="$(echo "$gone_models" | sed '/^$/d' | wc -l | tr -d ' ')"
+  local local_count="$(echo "$local_models" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+  # --remove --id=<raw_id>: targeted removal of exactly one obsolete entry.
+  if [[ "$remove" -eq 1 && -n "$remove_id" ]]; then
+    if echo "$cpa_models" | grep -Fxq "$remove_id"; then
+      echo "[SKIP] '$remove_id' is still served by CPA — not obsolete, not removed."
+      return 0
+    fi
+    if ! echo "$local_models" | grep -Fxq "$remove_id"; then
+      echo "[SKIP] '$remove_id' is not in availableModels — nothing to remove."
+      return 0
+    fi
+    json="$(echo "$json" | CC_REMOVE_ID="$remove_id" python3 -c "
+import json,sys,os
+d=json.load(sys.stdin)
+rid=os.environ['CC_REMOVE_ID']
+d['availableModels']=[m for m in d.get('availableModels',[]) if m != rid]
+json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
+")"
+    echo "$json" | __cc_save_settings || return 1
+    echo "[OK]  Removed '$remove_id' from availableModels."
+    return 0
+  fi
 
   echo ""
   echo "=== CPA Sync Report ==="
-  echo "  CPA total : $count"
-  local local_count="$(echo "$local_models" | sed '/^$/d' | wc -l | tr -d ' ')"
+  echo "  CPA total : $count (${cpa_a_count} with 'a-' prefix)"
   echo "  Local     : $local_count"
   [[ "$new_count" -gt 0 ]] && echo "  New       : +$new_count (not yet in local)"
   [[ "$gone_count" -gt 0 ]] && echo "  Gone      : -$gone_count (removed from CPA)"
+
+  # Explicitly surface a- IDs so they can never be mistaken for absent.
+  if [[ "$cpa_a_count" -gt 0 ]]; then
+    echo ""
+    echo "  'a-' models served by CPA (kept as distinct IDs):"
+    echo "$cpa_models" | grep '^a-' | while IFS= read -r m; do
+      if echo "$local_models" | grep -Fxq "$m"; then
+        echo "    = $m"
+      else
+        echo "    + $m (new)"
+      fi
+    done
+  fi
 
   echo ""
   echo "=== CPA Model List ==="
@@ -1286,11 +1576,16 @@ for m in sorted(d.get('availableModels',[])):
   echo "$cpa_models" | __cc_categorize_models --verbose
 
   echo ""
-  echo -n "Press Enter to continue, or type 'q' to cancel sync: "
-  read -r choice
-  if [[ "$choice" == "q" ]]; then
-    echo "Sync cancelled."
-    return 0
+  if [[ -t 0 ]]; then
+    echo -n "Press Enter to continue, or type 'q' to cancel sync: "
+    read -r choice
+    if [[ "$choice" == "q" ]]; then
+      echo "Sync cancelled."
+      return 0
+    fi
+  else
+    # Non-interactive (fixture/CI): never block on a prompt.
+    echo "  [non-interactive] no prompt; continuing"
   fi
 
   if [[ -n "$(echo "$new_models" | sed '/^$/d')" ]]; then
@@ -1301,28 +1596,33 @@ for m in sorted(d.get('availableModels',[])):
     local add=0
     if [[ "$force" -eq 1 ]]; then
       add=1
-    else
+    elif [[ -t 0 ]]; then
       echo ""
       echo -n "Add these to local list? [Y/n] "
       read -r choice
       add=1
       [[ "$choice" == "n" || "$choice" == "N" ]] && add=0
+    else
+      add=0
+      echo "  (non-interactive) not adding; use --force to merge"
     fi
 
     if [[ "$add" -eq 1 ]]; then
-      json="$(echo "$json" | python3 -c "
-import json,sys
+      # Merge as an exact set union of raw IDs. Distinct IDs stay distinct.
+      json="$(echo "$json" | CC_NEW_MODELS="$new_models" python3 -c "
+import json,sys,os
 d=json.load(sys.stdin)
-new_models='''$new_models'''
 existing=set(d.get('availableModels',[]))
-for m in new_models.split('\n'):
+for m in os.environ.get('CC_NEW_MODELS','').split('\n'):
     m=m.strip()
     if m:
         existing.add(m)
 d['availableModels']=sorted(existing)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-      echo "$json" | __cc_save_settings
+      if ! echo "$json" | __cc_save_settings; then
+        return 1
+      fi
       local merged_count="$(echo "$json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('availableModels',[])))")"
       echo "Updated: $local_count -> $merged_count models"
     else
@@ -1336,16 +1636,18 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
     echo "$gone_models" | sed '/^$/d' | while IFS= read -r m; do echo "  - $m"; done
 
     if [[ "$remove" -eq 1 ]]; then
-      json="$(echo "$json" | python3 -c "
-import json,sys
+      # Obsolete == absent from CPA under its OWN raw ID. Nothing else is dropped.
+      json="$(echo "$json" | CC_CPA_MODELS="$cpa_models" python3 -c "
+import json,sys,os
 d=json.load(sys.stdin)
-cpa_models='''$cpa_models'''
-cpa_set=set(m.strip() for m in cpa_models.split('\n') if m.strip())
+cpa_set=set(m.strip() for m in os.environ.get('CC_CPA_MODELS','').split('\n') if m.strip())
 local=d.get('availableModels',[])
 d['availableModels']=sorted(m for m in local if m in cpa_set)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-      echo "$json" | __cc_save_settings
+      if ! echo "$json" | __cc_save_settings; then
+        return 1
+      fi
       local cleaned_count="$(echo "$json" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('availableModels',[])))")"
       echo "Cleaned: $local_count -> $cleaned_count models"
     else
@@ -1365,10 +1667,52 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
   fi
 
   echo ""
-  echo "Tip: cc-sync --list      -- show full model list only"
-  echo "Tip: cc-sync --force     -- auto-add new models"
-  echo "Tip: cc-sync --remove    -- remove obsolete models"
-  echo "Tip: cc-sync --reassign  -- sync + reassign task models"
+  echo "Tip: cc-sync --list       -- raw model ID list"
+  echo "Tip: cc-sync --list-raw   -- raw ID + canonical ID view"
+  echo "Tip: cc-sync --force      -- auto-add new models"
+  echo "Tip: cc-sync --remove     -- remove obsolete models"
+  echo "Tip: cc-sync --remove --id=<raw_id>  -- remove one specific obsolete model"
+  echo "Tip: cc-sync --health     -- probe every CPA raw ID, record HTTP status"
+  echo "Tip: cc-sync --reassign   -- sync + reassign task models"
+}
+
+# Probe CPA raw IDs through the real Claude/CPA endpoint (POST /v1/messages)
+# and record raw_id / HTTP status / error class. Prefix is irrelevant to routing:
+# every ID listed is actually dialed, a- or not.
+__cc_sync_health_report() {
+  local ids="$1"
+  local raw healthy=0 failed=0 total=0
+  local failed_list=""
+
+  echo ""
+  echo "=== CPA Model Health (raw ID) ==="
+  while IFS=$'\t' read -r raw _canon; do
+    [[ -z "$raw" ]] && continue
+    total=$((total + 1))
+    unset "__cc_health_cache[$raw]"
+    if __cc_test_model_health "$raw" 10; then
+      healthy=$((healthy + 1))
+      printf '  [OK]   %-42s HTTP %s\n' "$raw" "${CC_LAST_HEALTH_STATUS:-200}"
+    else
+      failed=$((failed + 1))
+      failed_list="$failed_list$raw"$'\n'
+      printf '  [FAIL] %-42s HTTP %s (%s)\n' "$raw" "${CC_LAST_HEALTH_STATUS:-000}" "${CC_LAST_HEALTH_CLASS:-unknown}"
+    fi
+  done <<< "$ids"
+
+  echo ""
+  echo "  Total   : $total"
+  echo "  Healthy : $healthy"
+  echo "  Failed  : $failed"
+  [[ -n "${CC_HEALTH_LOG:-}" ]] && echo "  Evidence: $CC_HEALTH_LOG"
+
+  if [[ "$failed" -gt 0 ]]; then
+    echo ""
+    echo "  Failed IDs (prefix is not a skip reason — each was actually probed):"
+    echo "$failed_list" | sed '/^$/d' | while IFS= read -r m; do echo "    - $m"; done
+    return 1
+  fi
+  return 0
 }
 
 # === SKILL MENU MANAGEMENT ===
@@ -1445,7 +1789,7 @@ if 'skillOverrides' not in d or not isinstance(d['skillOverrides'], dict):
 d['skillOverrides'][name]='off'
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-  echo "$json" | __cc_save_settings
+  echo "$json" | __cc_save_settings || return 1
   echo "[HIDDEN]  $name"
 }
 
@@ -1468,13 +1812,22 @@ if isinstance(ov,dict) and name in ov:
     del ov[name]
     d['skillOverrides']=ov
     json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
+    # RIC-1851: json.dump emits no trailing newline, so the marker used to be
+    # glued to the closing brace ('}REMOVED') and never matched '^REMOVED$'.
+    # Terminate the JSON line first so the caller can detect and strip it.
+    sys.stdout.write('\n')
     print('REMOVED')
 else:
     print('NOT_FOUND')
 ")"
 
   if echo "$json" | grep -q "^REMOVED$"; then
-    echo "$json" | head -n -1 | __cc_save_settings
+    # RIC-1851: `head -n -1` is a GNU extension; on macOS BSD head it fails with
+    # "illegal line count" and the save silently becomes a no-op. sed '$d' drops
+    # the trailing marker portably.
+    if ! echo "$json" | sed '$d' | __cc_save_settings; then
+      return 1
+    fi
     echo "[OK]  Restored: $name"
   else
     echo "[!]   $name is not hidden."
@@ -1495,7 +1848,7 @@ d=json.load(sys.stdin)
 d.pop('skillOverrides',None)
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-      echo "$json" | __cc_save_settings
+      echo "$json" | __cc_save_settings || return 1
       echo "[OK]  Switched to 'default' profile: all skills visible"
       ;;
     minimal)
@@ -1511,7 +1864,7 @@ d['skillOverrides']={
 }
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-      echo "$json" | __cc_save_settings
+      echo "$json" | __cc_save_settings || return 1
       echo "[OK]  Switched to 'minimal' profile: hidden docs/examples, financial/pitch menu-only"
       ;;
     dev)
@@ -1527,7 +1880,7 @@ d['skillOverrides']={
 }
 json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 ")"
-      echo "$json" | __cc_save_settings
+      echo "$json" | __cc_save_settings || return 1
       echo "[OK]  Switched to 'dev' profile: dev skills only"
       ;;
     custom)
@@ -1768,9 +2121,11 @@ __cc_show_menu() {
   echo "  cc-config          View/override task-model assignments"
   echo "  cc-status          Full model inventory with task assignments"
   echo "  cc-sync            Sync models from CPA"
-  echo "    cc-sync --list    Show full CPA model list"
+  echo "    cc-sync --list    Show full CPA model list (raw IDs)"
+  echo "    cc-sync --list-raw  Raw ID + canonical ID view"
   echo "    cc-sync --force   Auto-add new models"
   echo "    cc-sync --remove  Remove obsolete models"
+  echo "    cc-sync --health  Probe every CPA raw ID"
   echo "    cc-sync --reassign Sync + reassign task models"
   echo ""
   echo "  cc-test            Test all models for health"

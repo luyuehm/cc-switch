@@ -9,10 +9,19 @@ The repo release version lives in [`VERSION`](VERSION) and is bumped at release 
 ### Added
 
 - **`VERSION`** — single source of truth for the repo release version. Both installers read it and print it in their banner, falling back to an embedded literal when run outside a checkout.
+- **`tests/ric-1851-regression.sh`** — macOS regression matrix covering the `a-` ID and settings-persistence fixes below. Runs against a throwaway `HOME` and a local mock of the CPA `/v1/models` endpoint, so it needs no network and never touches the real `~/.claude/settings.json`. Fails 6 of 8 checks against the pre-fix script.
 
 ### Changed
 
 - **`install.sh` / `install.ps1`** — banners now show the repo release version instead of a hardcoded string. `install.sh` previously printed `v2.4.0`, which was the macOS *feature set* and drifted from the repo release.
+
+### Fixed
+
+- **`cc-switch.sh` — `a-`-prefixed models are first-class IDs.** `a-deepseek-flash` and `deepseek-flash` are now fetched, stored, selected, health-checked and removed as distinct entries. Previously a prefix-stripping/alias-normalising pass could collapse the two, so syncing a CPA that serves both could drop or overwrite one of them. Removal matches the raw ID exactly, so `--remove --id=deepseek-flash` leaves `a-deepseek-flash` alone.
+- **`cc-switch.sh` — `CC_SETTINGS_PATH` is passed to the save helper.** It is a plain shell variable, never exported, so the child Python could not see it in `os.environ` and died with `KeyError: 'CC_SETTINGS_PATH'` — which callers ignored. Assigning a custom path (or letting `~/.zshrc` source the script, where nothing is exported) now works.
+- **`cc-switch.sh` — settings saves are atomic and failures are no longer reported as success.** The helper writes to a temp file and `os.replace`s it, so an interrupted write cannot truncate the live settings file. Every call site now checks the result and returns non-zero, so a failed save no longer prints `[OK] Updated` / `Done` while the file is unchanged.
+- **`cc-switch.sh` — an unparseable settings file is reported, not overwritten.** A corrupt JSON file used to be silently replaced with `{"availableModels":[],"env":{}}`, deleting every configured model; it is now refused with an error.
+- **`cc-switch.sh` — `cc-show` strips its trailing marker portably.** `json.dump` emits no trailing newline, so the marker was glued to the closing brace (`}REMOVED`) and never matched; and `head -n -1` is a GNU extension that fails on macOS BSD `head`, making the restore a silent no-op. The marker is now newline-terminated and removed with `sed '$d'`.
 
 ### Documentation
 
