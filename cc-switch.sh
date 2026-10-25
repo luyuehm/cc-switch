@@ -81,6 +81,20 @@ __cc_load_env() {
 
 __cc_load_env
 
+# Read a single KEY from an env file WITHOUT exporting it.
+# Usage: __cc_env_file_get KEY [FILE]   (FILE defaults to $CC_ENV_PATH)
+# Why: ~/.zshrc exports CC_SWITCH_SKIP_ENV=1 so __cc_load_env is a no-op at
+# shell startup. Commands that need credentials must still see them, and they
+# must not leak into the interactive shell's environment.
+__cc_env_file_get() {
+  local key="$1" file="${2:-$CC_ENV_PATH}"
+  [[ -n "$key" && -f "$file" ]] || return 0
+  grep -E "^[[:space:]]*${key}=" "$file" 2>/dev/null | head -1 | cut -d= -f2- \
+    | tr -d '\r' \
+    | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+          -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/"
+}
+
 __cc_json_get() {
   python3 -c "import json,sys; d=json.load(sys.stdin); print($1)" 2>/dev/null
 }
@@ -242,8 +256,13 @@ __cc_get_current_model() {
 }
 
 # ─── CPA Endpoint Resolution ───
-# Priority: shell ANTHROPIC_BASE_URL > file CPA_MODELS_URL > ~/.openclaw/.env > settings.json
-# Auth: shell ANTHROPIC_AUTH_TOKEN > shell ANTHROPIC_API_KEY > file CPA_API_KEY > ~/.openclaw/.env > settings.json
+# Priority: shell ANTHROPIC_BASE_URL > $CPA_MODELS_URL > cc-switch.env > ~/.openclaw/.env > settings.json
+# Auth: shell ANTHROPIC_AUTH_TOKEN > shell ANTHROPIC_API_KEY > $CPA_API_KEY > cc-switch.env > ~/.openclaw/.env > settings.json
+# NOTE: ~/.zshrc exports CC_SWITCH_SKIP_ENV=1, so __cc_load_env never runs at
+# shell startup and $CC_ENV_PATH is *not* in the environment. Every source below
+# is therefore also read straight from disk via __cc_env_file_get.
+# NOTE: `json` is declared exactly once per function — zsh 5.9 prints
+# "json=..." to stdout when a bare `local` re-declares an existing local.
 __cc_resolve_endpoint() {
   local shell_url="${ANTHROPIC_BASE_URL:-}"
   local shell_token="${ANTHROPIC_AUTH_TOKEN:-}"
@@ -251,6 +270,9 @@ __cc_resolve_endpoint() {
 
   local cpa_url=""
   local api_key=""
+  local json=""
+  local base_url=""
+  local env_url=""
 
   # URL resolution
   if [[ -n "$shell_url" ]]; then
@@ -258,18 +280,25 @@ __cc_resolve_endpoint() {
   elif [[ -n "${CPA_MODELS_URL:-}" ]]; then
     cpa_url="$CPA_MODELS_URL"
   else
-    # Fallback: read from ~/.openclaw/.env (unified config)
-    local openclaw_url=""
-    [[ -f "$HOME/.openclaw/.env" ]] && openclaw_url="$(grep '^CLAUDE_CODE_BASE_URL=' "$HOME/.openclaw/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
-    [[ -n "$openclaw_url" ]] && cpa_url="${openclaw_url%/}/v1/models"
+    # Fallback 1: read $CC_ENV_PATH from disk (its vars are NOT in the shell
+    # because CC_SWITCH_SKIP_ENV=1 suppresses the startup export)
+    cpa_url="$(__cc_env_file_get CPA_MODELS_URL)"
+    if [[ -z "$cpa_url" ]]; then
+      env_url="$(__cc_env_file_get CLAUDE_CODE_BASE_URL)"
+      [[ -z "$env_url" ]] && env_url="$(__cc_env_file_get ANTHROPIC_BASE_URL)"
+      [[ -n "$env_url" ]] && cpa_url="${env_url%/}/v1/models"
+    fi
+    # Fallback 2: ~/.openclaw/.env (unified config)
+    if [[ -z "$cpa_url" ]]; then
+      env_url="$(__cc_env_file_get CLAUDE_CODE_BASE_URL "$HOME/.openclaw/.env")"
+      [[ -n "$env_url" ]] && cpa_url="${env_url%/}/v1/models"
+    fi
   fi
 
   # If still empty, try settings.json
   if [[ -z "$cpa_url" ]]; then
-    local json
     json="$(__cc_read_settings 2>/dev/null)" || true
     if [[ -n "$json" ]]; then
-      local base_url
       base_url="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_BASE_URL','')")"
       [[ -n "$base_url" ]] && cpa_url="${base_url%/}/v1/models"
     fi
@@ -283,14 +312,17 @@ __cc_resolve_endpoint() {
   elif [[ -n "${CPA_API_KEY:-}" ]]; then
     api_key="$CPA_API_KEY"
   else
-    # Fallback: read from ~/.openclaw/.env
-    [[ -f "$HOME/.openclaw/.env" ]] && api_key="$(grep '^CPA_API_KEY=' "$HOME/.openclaw/.env" 2>/dev/null | head -1 | cut -d= -f2-)"
+    # Fallback 1: same file, on disk
+    api_key="$(__cc_env_file_get ANTHROPIC_AUTH_TOKEN)"
+    [[ -z "$api_key" ]] && api_key="$(__cc_env_file_get ANTHROPIC_API_KEY)"
+    [[ -z "$api_key" ]] && api_key="$(__cc_env_file_get CPA_API_KEY)"
+    # Fallback 2: ~/.openclaw/.env
+    [[ -z "$api_key" ]] && api_key="$(__cc_env_file_get CPA_API_KEY "$HOME/.openclaw/.env")"
   fi
 
   # If still empty, try settings.json
   if [[ -z "$api_key" ]]; then
-    local json
-    json="$(__cc_read_settings 2>/dev/null)" || true
+    [[ -z "$json" ]] && { json="$(__cc_read_settings 2>/dev/null)" || true; }
     if [[ -n "$json" ]]; then
       api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_AUTH_TOKEN','')")"
       [[ -z "$api_key" ]] && api_key="$(echo "$json" | __cc_json_get "d.get('env',{}).get('ANTHROPIC_API_KEY','')")"
@@ -515,6 +547,9 @@ for cat in sorted(groups):
 __cc_auto_assign() {
   local start_time
   start_time="$(date +%s)"
+  # Declared once: a bare `local json` later in this function would make zsh
+  # print "json=..." to stdout and corrupt the assignment output.
+  local json=""
 
   # Step 0: Fetch model list (with progress)
   echo -n "  Fetching CPA models..." >&2
@@ -522,7 +557,6 @@ __cc_auto_assign() {
   cpa_models="$(__cc_fetch_cpa_models 2>/dev/null)" || true
 
   if [[ -z "$cpa_models" ]]; then
-    local json
     json="$(__cc_read_settings)" || return 1
     cpa_models="$(echo "$json" | python3 -c "
 import json,sys
@@ -708,7 +742,6 @@ for m in sorted(d.get('availableModels',[]) or []):
   echo "  All ${#assign[@]} assigned models verified healthy${total_str} (${elapsed}s)" >&2
 
   # Save to settings.json
-  local json
   json="$(__cc_read_settings)" || return 1
 
   local tm_json="{"
@@ -1420,12 +1453,12 @@ cc-sync() {
   local cpa_url="${ep_raw%|*}"
 
   if [[ -z "$cpa_url" || -z "$api_key" ]]; then
-    echo "Error: CPA_MODELS_URL or API key not configured." >&2
-    echo "  Set in ~/.openclaw/.env (recommended):" >&2
-    echo "    CLAUDE_CODE_BASE_URL=http://127.0.0.1:8317" >&2
+    echo "Error: no CPA endpoint / API key found." >&2
+    echo "  Looked in: shell env → $CC_ENV_PATH → ${HOME}/.openclaw/.env → $CC_SETTINGS_PATH" >&2
+    echo "  Fix (recommended) — add both lines to $CC_ENV_PATH:" >&2
+    echo "    CPA_MODELS_URL=https://your-cpa-proxy/v1/models" >&2
     echo "    CPA_API_KEY=<your-cpa-key>" >&2
-    echo "  Or set in ~/.claude/cc-switch.env:" >&2
-    echo "    CPA_MODELS_URL and ANTHROPIC_API_KEY" >&2
+    echo "  Then re-run: cc-sync" >&2
     return 1
   fi
 

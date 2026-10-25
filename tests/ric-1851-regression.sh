@@ -91,6 +91,7 @@ clean_env() {
       -u ANTHROPIC_DEFAULT_OPUS_MODEL_NAME -u ANTHROPIC_DEFAULT_SONNET_MODEL_NAME \
       -u ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME \
       -u CC_SETTINGS_PATH -u CC_ENV_PATH -u CC_ALIAS_FILE -u CC_HEALTH_LOG \
+      -u CC_SWITCH_SKIP_ENV \
       "$@"
 }
 
@@ -208,7 +209,44 @@ else
   record "RIC-1851 cc-show portable marker strip" FAIL "rc=$(rc_of "$OUT") state=$ST"
 fi
 
-# ── T8: syntax ──────────────────────────────────────────────────────────
+# ── T8: cc-sync reads cc-switch.env when startup export is suppressed ────
+# ~/.zshrc exports CC_SWITCH_SKIP_ENV=1 before sourcing cc-switch.sh, so
+# __cc_load_env is a no-op and nothing from cc-switch.env is in the shell. The
+# endpoint resolver must still read the file from disk, otherwise cc-sync dies
+# with "no CPA endpoint / API key found".
+new_sandbox
+printf '%s\n' '{"availableModels":[],"env":{}}' > "$SET"
+cat > "$SBX/home/.claude/cc-switch.env" <<EOF
+CPA_MODELS_URL=http://127.0.0.1:$PORT/v1/models
+CPA_API_KEY=file-only-key
+EOF
+OUT=$(clean_env HOME="$SBX/home" CC_SWITCH_SKIP_ENV=1 \
+  bash -c '. "$1"; echo "KEY=[${CPA_API_KEY:-}]"; cc-sync --force; echo "RC=$?"' _ "$SCRIPT" 2>&1)
+M=$(models_of "$SET")
+if [[ "$(rc_of "$OUT")" == "RC=0" ]] \
+   && printf '%s\n' "$OUT" | grep -q 'KEY=\[\]' \
+   && printf '%s\n' "$M" | grep -Fxq 'a-deepseek-flash' \
+   && printf '%s\n' "$M" | grep -Fxq 'gpt-5.3-codex'; then
+  record "cc-sync reads cc-switch.env with SKIP_ENV=1" PASS "file creds used, shell untouched"
+else
+  record "cc-sync reads cc-switch.env with SKIP_ENV=1" FAIL "rc=$(rc_of "$OUT") got=$(printf '%s' "$M" | tr '\n' ',')"
+fi
+
+# ── T9: no credentials ⇒ clean empty resolver output (zsh) ───────────────
+# Under zsh 5.9 a bare `local json` that re-declares an existing local prints
+# "json=..." to stdout, which used to corrupt `__cc_resolve_endpoint` and feed
+# the settings JSON into curl as a URL. The output must be exactly "|".
+new_sandbox
+printf '%s\n' '{"availableModels":[],"env":{}}' > "$SET"
+RES=$(clean_env HOME="$SBX/home" CC_SWITCH_SKIP_ENV=1 \
+  zsh -c '. "$1"; __cc_resolve_endpoint' _ "$SCRIPT" 2>&1)
+if [[ "$RES" == "|" ]]; then
+  record "resolver output clean without credentials (zsh)" PASS "exactly '|'"
+else
+  record "resolver output clean without credentials (zsh)" FAIL "got $(printf '%s' "$RES" | wc -c | tr -d ' ') bytes"
+fi
+
+# ── T10: syntax ─────────────────────────────────────────────────────────
 zsh -n "$SCRIPT" 2>/dev/null && record "syntax: zsh -n" PASS || record "syntax: zsh -n" FAIL
 bash -n "$SCRIPT" 2>/dev/null && record "syntax: bash -n" PASS || record "syntax: bash -n" FAIL
 

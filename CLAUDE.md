@@ -22,8 +22,10 @@ Single bash/zsh file for macOS. Feature parity with PowerShell version: health c
 3. `__cc_find_claude` — searches known paths, validates `--version | grep "Claude Code"`, falls back to npx
 
 **Endpoint resolution (`__cc_resolve_endpoint`):**
-- Priority: shell `ANTHROPIC_BASE_URL` → `CPA_MODELS_URL` → `~/.openclaw/.env` (`CLAUDE_CODE_BASE_URL`) → `settings.json`
-- Auth: shell `ANTHROPIC_AUTH_TOKEN` → `ANTHROPIC_API_KEY` → `~/.openclaw/.env` (`CPA_API_KEY`) → `settings.json`
+- Priority: shell `ANTHROPIC_BASE_URL` → `CPA_MODELS_URL` → `cc-switch.env` on disk → `~/.openclaw/.env` (`CLAUDE_CODE_BASE_URL`) → `settings.json`
+- Auth: shell `ANTHROPIC_AUTH_TOKEN` → `ANTHROPIC_API_KEY` → `CPA_API_KEY` → `cc-switch.env` on disk → `~/.openclaw/.env` (`CPA_API_KEY`) → `settings.json`
+- `__cc_env_file_get KEY [FILE]` reads a single key from an env file **without exporting it**. This is required because `~/.zshrc` exports `CC_SWITCH_SKIP_ENV=1` before sourcing, so `__cc_load_env` is a no-op at startup and file credentials are absent from the shell env. Commands (`cc-sync`, health checks, `cc-test`) must still work, and the interactive shell must stay free of `ANTHROPIC_API_KEY` (Claude Code auth conflict).
+- **zsh 5.9 pitfall:** a bare `local name` that re-declares an existing local prints `name=value` to stdout. Inside a function that emits machine-readable output this corrupts the result. Declare each local once (`local json=""`), never twice.
 
 **Health check (`__cc_test_model_health`):**
 - In-memory cache with 60s TTL using zsh associative array
@@ -227,8 +229,8 @@ CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models   # optional
 
 - **Model names** in `cc <model>` must match entries in `availableModels` array exactly
 - **API key resolution**: process env (from `.env`) → `settings.json.env.ANTHROPIC_API_KEY`
-- **macOS endpoint resolution**: shell env → `~/.openclaw/.env` (`CLAUDE_CODE_BASE_URL`/`CPA_API_KEY`) → `cc-switch.env` → `settings.json`
-- **`cc-sync`** fetches from `CPA_MODELS_URL`, falls back to `ANTHROPIC_BASE_URL/v1/models`, authorizes with `ANTHROPIC_API_KEY`
+- **macOS endpoint resolution**: shell env → `cc-switch.env` (on disk, even with `CC_SWITCH_SKIP_ENV=1`) → `~/.openclaw/.env` (`CLAUDE_CODE_BASE_URL`/`CPA_API_KEY`) → `settings.json`
+- **`cc-sync`** fetches from `CPA_MODELS_URL` (or `cc-switch.env` / `ANTHROPIC_BASE_URL/v1/models`), authorizes with the first of `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `CPA_API_KEY` found in env, `cc-switch.env` or `~/.openclaw/.env`
 - **Oh My Posh** expects themes at `C:\tools\oh-my-posh\themes\*.omp.json` (Windows) or homebrew path (macOS)
 - **Python scripts** require Python 3 and are optional; core is all PowerShell (Windows) or bash/zsh+curl+python3 (macOS)
 - **CPA Cleaner** runs on localhost:8317, set `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` to use

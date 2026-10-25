@@ -337,6 +337,21 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 # CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 ```
 
+#### `cc-sync` says "no CPA endpoint / API key found"
+
+Many `~/.zshrc` setups export `CC_SWITCH_SKIP_ENV=1` **before** sourcing
+`cc-switch.sh`, so `cc-switch.env` is deliberately not exported into the shell
+(that is what avoids the "Both set" warning in Claude Code). cc-switch therefore
+reads the file from disk on demand: shell env → `~/.claude/cc-switch.env` →
+`~/.openclaw/.env` → `settings.json`. If the error still appears, the file is
+genuinely missing an endpoint or key:
+
+```bash
+# ~/.claude/cc-switch.env
+CPA_MODELS_URL=https://your-cpa-proxy/v1/models
+CPA_API_KEY=***
+```
+
 ### Usage
 
 ```powershell
