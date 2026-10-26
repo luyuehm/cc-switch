@@ -8,6 +8,7 @@ The repo release version lives in [`VERSION`](VERSION) and is bumped at release 
 
 ### Added
 
+- **Configurable fallback CPA endpoints** — `CPA_FALLBACK_URLS` (both scripts) and `CPA_FALLBACK_API_KEY` (per-entry `url|key` also works) let read-only commands survive a dead primary endpoint. `Resolve-CPAEndpoints` / `__cc_resolve_fallbacks` normalize `http://host`, `http://host/v1` and `http://host/v1/models` to the same base + models URL pair, and `Invoke-CCModelsRequest` / `__cc_fetch_cpa_models` walk the list. Failover happens on transport failure, timeout and 5xx only — a 4xx is a real answer and is reported rather than masked. `cc-sync` and `cc-test` print which endpoint answered; `cc <model>` still launches against `ANTHROPIC_BASE_URL` unchanged.
 - **`VERSION`** — single source of truth for the repo release version. Both installers read it and print it in their banner, falling back to an embedded literal when run outside a checkout.
 - **`tests/ric-1851-regression.sh`** — macOS regression matrix covering the `a-` ID, settings-persistence and endpoint-resolution fixes below. Runs against a throwaway `HOME` and a local mock of the CPA `/v1/models` endpoint, so it needs no network and never touches the real `~/.claude/settings.json`. 11 checks; the endpoint-resolution checks fail against the previous script.
 
@@ -29,6 +30,7 @@ The repo release version lives in [`VERSION`](VERSION) and is bumped at release 
 
 ### Documentation
 
+- **`README.md`** — new "Fallback CPA endpoints" subsection (list format, per-entry keys, which commands walk the list) and the two new variables in the Configuration env block.
 - **`README.md`** — versioning note explaining repo release vs per-platform feature set; `VERSION` added to the project tree.
 - **`cc-switch.sh` / `cc-switch.ps1`** — header comments now distinguish the repo release version from the platform feature-set label.
 

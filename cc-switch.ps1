@@ -62,16 +62,61 @@ function Save-CCSettings($json) {
     cc-default   — shortcut: gpt-5.5
 #>
 # PSScriptAnalyzer ignore: PSUseApprovedVerbs
-# CPA URL / API key resolution helper (shared by cc-sync, Get-CPAModelList, Invoke-CCAutoAssign)
-function Resolve-CPAEndpoint {
-    $cpaUrl = if ($env:CPA_MODELS_URL) {
+# === CPA ENDPOINTS ===
+#
+# An address may be written in any of these forms; all three normalize to the same pair:
+#     http://host           -> base http://host,           models http://host/v1/models
+#     http://host/v1        -> base http://host,           models http://host/v1/models
+#     http://host/v1/models -> base http://host,           models http://host/v1/models
+# The base is what Claude Code needs, because it appends /v1/messages itself.
+function ConvertTo-CCEndpoint {
+    param(
+        [string]$Address,
+        [string]$Label = 'endpoint',
+        [string]$DefaultKey = ''
+    )
+
+    $raw = "$Address".Trim()
+    if (-not $raw) { return $null }
+
+    # "url|key" pins a per-address key (fallback entries only).
+    $key = ''
+    $pipe = $raw.IndexOf('|')
+    if ($pipe -ge 0) {
+        $key = $raw.Substring($pipe + 1).Trim()
+        $raw = $raw.Substring(0, $pipe).Trim()
+    }
+    if (-not $key) { $key = $DefaultKey }
+
+    $url = $raw -replace '/+$', ''
+    if ($url -imatch '/v1/models$') {
+        $base = $url.Substring(0, $url.Length - '/v1/models'.Length)
+    } elseif ($url -imatch '/v1$') {
+        $base = $url.Substring(0, $url.Length - '/v1'.Length)
+    } else {
+        $base = $url
+    }
+    $base = $base -replace '/+$', ''
+    if (-not $base) { return $null }
+
+    return @{
+        Label     = $Label
+        BaseUrl   = $base
+        ModelsUrl = "$base/v1/models"
+        ApiKey    = $key
+    }
+}
+
+# Primary CPA endpoint: CPA_MODELS_URL, else ANTHROPIC_BASE_URL, else settings.json.
+function Resolve-CPAPrimaryEndpoint {
+    $address = if ($env:CPA_MODELS_URL) {
         $env:CPA_MODELS_URL
     } else {
         $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL } else {
             $json = Get-CCSettings
             if ($json) { $json.env.ANTHROPIC_BASE_URL } else { "" }
         }
-        if ($baseUrl) { "$baseUrl/v1/models" } else { "" }
+        if ($baseUrl) { $baseUrl } else { "" }
     }
 
     # Support both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN (parity with shell version)
@@ -84,7 +129,46 @@ function Resolve-CPAEndpoint {
         }
     }
 
-    return @{ Url = $cpaUrl; ApiKey = $apiKey }
+    return ConvertTo-CCEndpoint -Address $address -Label 'primary' -DefaultKey $apiKey
+}
+
+# Backup endpoints from CPA_FALLBACK_URLS (";" or "," separated, optionally "url|key").
+# A fallback reuses CPA_FALLBACK_API_KEY when set, otherwise the primary key.
+function Get-CCFallbackEndpoints {
+    $spec = $env:CPA_FALLBACK_URLS
+    if (-not $spec) { return @() }
+
+    $defaultKey = $env:CPA_FALLBACK_API_KEY
+    if (-not $defaultKey) {
+        $primary = Resolve-CPAPrimaryEndpoint
+        if ($primary) { $defaultKey = $primary.ApiKey }
+    }
+
+    $endpoints = @()
+    $index = 0
+    foreach ($entry in ($spec -split '[;,]')) {
+        if (-not $entry -or -not $entry.Trim()) { continue }
+        $index++
+        $ep = ConvertTo-CCEndpoint -Address $entry -Label "fallback-$index" -DefaultKey $defaultKey
+        if ($ep) { $endpoints += $ep }
+    }
+    return $endpoints
+}
+
+# Ordered candidates: primary first, then CPA_FALLBACK_URLS in the configured order.
+function Resolve-CPAEndpoints {
+    $endpoints = @()
+    $primary = Resolve-CPAPrimaryEndpoint
+    if ($primary) { $endpoints += $primary }
+    $endpoints += @(Get-CCFallbackEndpoints)
+    return $endpoints
+}
+
+# Back-compat helper: URL + key of the primary endpoint only.
+function Resolve-CPAEndpoint {
+    $primary = Resolve-CPAPrimaryEndpoint
+    if (-not $primary) { return @{ Url = ''; ApiKey = '' } }
+    return @{ Url = $primary.ModelsUrl; ApiKey = $primary.ApiKey }
 }
 
 # === HTTP TRANSPORT ===
@@ -206,6 +290,95 @@ function Invoke-CCHttpOnce {
     return $text | ConvertFrom-Json
 }
 
+# Classify an exception raised by Invoke-CCHttp. Status 0 means "no HTTP answer at all".
+function Get-CCErrorInfo {
+    param($Exception)
+
+    $ex = $Exception
+    while ($ex -is [System.Management.Automation.MethodInvocationException] -and $ex.InnerException) {
+        $ex = $ex.InnerException
+    }
+
+    $status = 0
+    if ($ex -is [System.Net.WebException] -and $ex.Response) {
+        try { $status = [int]$ex.Response.StatusCode } catch { $status = 0 }
+    }
+    return @{ Status = $status; Message = $ex.Message }
+}
+
+<#
+.SYNOPSIS
+    GET the CPA model list, walking the configured endpoints until one answers.
+
+.DESCRIPTION
+    Order: primary endpoint, then every address in CPA_FALLBACK_URLS. Failover happens on
+    transport failure, timeout and 5xx — i.e. an unreachable or half-broken relay. A 4xx is a
+    real answer (bad key, wrong path, quota) and is surfaced as-is instead of being masked by
+    the next endpoint.
+
+    Returns @{ Endpoint; Response; Failures } and throws when every endpoint failed.
+#>
+function Invoke-CCModelsRequest {
+    param([int]$TimeoutSec = 15)
+
+    $endpoints = @(Resolve-CPAEndpoints | Where-Object { $_ -and $_.ModelsUrl })
+    if ($endpoints.Count -eq 0) {
+        throw 'No CPA endpoint configured (set CPA_MODELS_URL or ANTHROPIC_BASE_URL).'
+    }
+
+    $failures = @()
+    foreach ($ep in $endpoints) {
+        if (-not $ep.ApiKey) {
+            $failures += "$($ep.Label) $($ep.ModelsUrl): no API key"
+            continue
+        }
+
+        try {
+            $response = Invoke-CCHttp -Uri $ep.ModelsUrl -Headers @{
+                'Authorization' = "Bearer $($ep.ApiKey)"
+                'Content-Type'  = 'application/json'
+            } -TimeoutSec $TimeoutSec
+            return @{ Endpoint = $ep; Response = $response; Failures = $failures }
+        } catch {
+            $info = Get-CCErrorInfo -Exception $_.Exception
+            if ($info.Status -ge 400 -and $info.Status -lt 500) { throw }
+            $failures += "$($ep.Label) $($ep.ModelsUrl): $($info.Message)"
+        }
+    }
+
+    throw ('No CPA endpoint answered. ' + ($failures -join ' | '))
+}
+
+<#
+.SYNOPSIS
+    Resolve the endpoint that currently answers, for callers that only need a base URL.
+.DESCRIPTION
+    Probes the model list once (read-only failover). When nothing answers, the primary endpoint
+    is returned with Reachable = $false so the caller can still report per-model failures.
+#>
+function Get-CPActiveEndpoint {
+    param([int]$TimeoutSec = 8)
+
+    $probeError = ''
+    try {
+        $result = Invoke-CCModelsRequest -TimeoutSec $TimeoutSec
+        if ($result) {
+            $ep = $result.Endpoint
+            $ep.Reachable = $true
+            return $ep
+        }
+    } catch {
+        $probeError = $_.Exception.Message
+    }
+
+    $primary = Resolve-CPAPrimaryEndpoint
+    if ($primary) {
+        $primary.Reachable = $false
+        $primary.ProbeError = $probeError
+    }
+    return $primary
+}
+
 # === MODEL CATEGORIZATION HELPERS ===
 
 <#
@@ -305,14 +478,16 @@ function Clear-StaleHealthCache {
 
 # Fetch model list from CPA, returns array or $null on failure
 function Get-CPAModelList {
-    $ep = Resolve-CPAEndpoint
-    if (-not $ep.Url -or -not $ep.ApiKey) { return $null }
+    try {
+        # Primary endpoint first, then CPA_FALLBACK_URLS.
+        $result = Invoke-CCModelsRequest -TimeoutSec 10
+    } catch {
+        return $null
+    }
+    if (-not $result) { return $null }
 
     try {
-        $response = Invoke-CCHttp -Uri $ep.Url -Headers @{
-            "Authorization" = "Bearer $($ep.ApiKey)"
-            "Content-Type" = "application/json"
-        } -TimeoutSec 10
+        $response = $result.Response
 
         $models = if ($response.data) {
             $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
@@ -897,45 +1072,50 @@ function global:cc-sync {
         [switch]$Reassign
     )
 
-    # Determine CPA models URL
-    $ep = Resolve-CPAEndpoint
-    $cpaUrl = $ep.Url
-    $apiKey = $ep.ApiKey
+    # Primary endpoint first, then CPA_FALLBACK_URLS (see Invoke-CCModelsRequest)
+    $endpoints = @(Resolve-CPAEndpoints | Where-Object { $_ -and $_.ModelsUrl -and $_.ApiKey })
 
-    if (-not $cpaUrl -or -not $apiKey) {
+    if ($endpoints.Count -eq 0) {
         Write-Host "Error: CPA_MODELS_URL or API key not configured." -ForegroundColor Red
         Write-Host "  Set CPA_MODELS_URL and ANTHROPIC_API_KEY in ~\.claude\cc-switch.env" -ForegroundColor Yellow
+        Write-Host "  Optional backup: CPA_FALLBACK_URLS=http://host:3000/v1[;http://other:3000]" -ForegroundColor Yellow
         return
     }
 
     Write-Host "Fetching models from CPA..." -ForegroundColor Cyan
-    Write-Host "  $cpaUrl" -ForegroundColor Gray
+    Write-Host "  $($endpoints[0].ModelsUrl)" -ForegroundColor Gray
 
     try {
-        $response = Invoke-CCHttp -Uri $cpaUrl -Headers @{
-            "Authorization" = "Bearer $apiKey"
-            "Content-Type" = "application/json"
-        } -TimeoutSec 15
-
-        $cpaModels = if ($response.data) {
-            $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
-        } elseif ($response -is [array]) {
-            $response | ForEach-Object { $_.id } | Where-Object { $_ }
-        } else {
-            Write-Host "Error: unexpected CPA response format." -ForegroundColor Red
-            return
-        }
-
-        if ($cpaModels.Count -eq 0) {
-            Write-Host "No models returned from CPA." -ForegroundColor Red
-            return
-        }
-
-        Write-Host "  Got $($cpaModels.Count) models from CPA" -ForegroundColor Green
+        $result = Invoke-CCModelsRequest -TimeoutSec 15
+        $endpoint = $result.Endpoint
+        $response = $result.Response
     } catch {
         Write-Host "Error fetching CPA models: $_" -ForegroundColor Red
         return
     }
+
+    if ($endpoint.Label -ne 'primary') {
+        Write-Host "  Primary endpoint did not answer - using $($endpoint.Label): $($endpoint.ModelsUrl)" -ForegroundColor Yellow
+        if ($result.Failures) {
+            $result.Failures | ForEach-Object { Write-Host "    skipped: $_" -ForegroundColor DarkGray }
+        }
+    }
+
+    $cpaModels = if ($response.data) {
+        $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
+    } elseif ($response -is [array]) {
+        $response | ForEach-Object { $_.id } | Where-Object { $_ }
+    } else {
+        Write-Host "Error: unexpected CPA response format." -ForegroundColor Red
+        return
+    }
+
+    if ($cpaModels.Count -eq 0) {
+        Write-Host "No models returned from CPA." -ForegroundColor Red
+        return
+    }
+
+    Write-Host "  Got $($cpaModels.Count) models from CPA" -ForegroundColor Green
 
     # -List mode: just show the full model list, no sync
     if ($List) {
@@ -1073,12 +1253,11 @@ function global:cc-test {
         return
     }
 
-    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL -replace '/+$', '' } else { $json.env.ANTHROPIC_BASE_URL }
-    $apiKey = if ($env:ANTHROPIC_API_KEY) { $env:ANTHROPIC_API_KEY } else {
-        if ($env:ANTHROPIC_AUTH_TOKEN) { $env:ANTHROPIC_AUTH_TOKEN } else {
-            if ($json.env.ANTHROPIC_API_KEY) { $json.env.ANTHROPIC_API_KEY } else { $json.env.ANTHROPIC_AUTH_TOKEN }
-        }
-    }
+    # Read-only failover: test whichever endpoint currently answers (primary first,
+    # then CPA_FALLBACK_URLS). Probing the model list is one request.
+    $ep = Get-CPActiveEndpoint -TimeoutSec 8
+    $baseUrl = if ($ep) { $ep.BaseUrl } else { $null }
+    $apiKey = if ($ep) { $ep.ApiKey } else { $null }
 
     if (-not $baseUrl -or -not $apiKey) {
         Write-Host "Error: ANTHROPIC_BASE_URL or API key not configured." -ForegroundColor Red
@@ -1100,6 +1279,12 @@ function global:cc-test {
     Write-Host "=== Model Health Test ===" -ForegroundColor Cyan
     Write-Host "  Models : $total"
     Write-Host "  Endpoint: $baseUrl"
+    if ($ep.Label -ne 'primary') {
+        Write-Host "  Fallback: $($ep.Label) - primary endpoint did not answer" -ForegroundColor Yellow
+    }
+    if (-not $ep.Reachable) {
+        Write-Host "  Warning : no endpoint answered the probe; results below are from the primary only" -ForegroundColor Yellow
+    }
     Write-Host "  Timeout: ${Timeout}s per model"
     Write-Host "  Parallel: $Parallel"
     Write-Host ""

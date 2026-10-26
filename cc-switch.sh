@@ -332,6 +332,55 @@ __cc_resolve_endpoint() {
   echo "${cpa_url}|${api_key}"
 }
 
+# Normalize a CPA address ("http://host", "http://host/v1", "http://host/v1/models")
+# into "base_url|models_url". The base is what Claude Code needs, since it appends
+# /v1/messages itself.
+__cc_normalize_endpoint() {
+  local url="${1%/}"
+  local base=""
+  case "$url" in
+    */v1/models) base="${url%/v1/models}" ;;
+    */v1) base="${url%/v1}" ;;
+    *) base="$url" ;;
+  esac
+  base="${base%/}"
+  [[ -z "$base" ]] && return 1
+  printf '%s|%s/v1/models\n' "$base" "$base"
+}
+
+# Emit "label|base_url|models_url|api_key" for every address in $CPA_FALLBACK_URLS.
+# Entries are separated by ';' or ','; an entry may pin its own key as "url|key".
+# A fallback without its own key reuses $CPA_FALLBACK_API_KEY, then the primary key.
+__cc_resolve_fallbacks() {
+  local spec="${CPA_FALLBACK_URLS:-}"
+  [[ -z "$spec" ]] && spec="$(__cc_env_file_get CPA_FALLBACK_URLS)"
+  [[ -z "$spec" ]] && return 0
+
+  local default_key="${CPA_FALLBACK_API_KEY:-}"
+  [[ -z "$default_key" ]] && default_key="$(__cc_env_file_get CPA_FALLBACK_API_KEY)"
+  if [[ -z "$default_key" ]]; then
+    local primary_raw
+    primary_raw="$(__cc_resolve_endpoint)"
+    default_key="${primary_raw##*|}"
+  fi
+
+  local index=0 entry url key norm base
+  while IFS= read -r entry; do
+    entry="$(printf '%s' "$entry" | tr -d '\r' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -z "$entry" ]] && continue
+    index=$((index + 1))
+    url="$entry"
+    key="$default_key"
+    if [[ "$entry" == *"|"* ]]; then
+      url="${entry%%|*}"
+      key="${entry#*|}"
+    fi
+    norm="$(__cc_normalize_endpoint "$url")" || continue
+    base="${norm%%|*}"
+    printf 'fallback-%d|%s|%s|%s\n' "$index" "$base" "${norm#*|}" "$key"
+  done <<< "$(printf '%s' "$spec" | tr ';,' '\n')"
+}
+
 # ─── Health Check ───
 # Ping a model via POST /v1/messages using its RAW ID to verify it's responsive.
 # Every probe — a- prefixed or not — takes the same path; the prefix is never a
@@ -387,8 +436,12 @@ __cc_test_model_health() {
   local api_key="${ep_raw##*|}"
   local cpa_url="${ep_raw%|*}"
   local base_url
-  base_url="${ANTHROPIC_BASE_URL:-}"
+  # cc-test exports the endpoint that actually answers (read-only failover) so that
+  # health results describe the endpoint Claude Code would talk to right now.
+  base_url="${CC_ACTIVE_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
+  [[ -n "${CC_ACTIVE_API_KEY:-}" ]] && api_key="$CC_ACTIVE_API_KEY"
   [[ -z "$base_url" ]] && base_url="${cpa_url%/v1/models}"
+  base_url="${base_url%/}"
 
   if [[ -z "$base_url" || -z "$api_key" ]]; then
     __cc_health_cache[$model]="$now:unhealthy"
@@ -485,20 +538,75 @@ __cc_select_healthy_model() {
 # ─── CPA Model Fetch ───
 # Emits provider raw IDs verbatim (RIC-1845). 'a-' IDs are kept as first-class
 # entries; nothing is mapped to a bare name and nothing is filtered by prefix.
+#
+# Tries the primary endpoint first, then every address in $CPA_FALLBACK_URLS.
+# Failover happens on transport failure, timeout and 5xx; a 4xx is a real answer
+# (bad key / wrong path / quota) and is surfaced instead of being masked.
+# The endpoint actually used is left in CC_LAST_CPA_ENDPOINT / _LABEL / _API_KEY.
+CC_LAST_CPA_ENDPOINT=""
+CC_LAST_CPA_ENDPOINT_LABEL=""
+CC_LAST_CPA_API_KEY=""
+
 __cc_fetch_cpa_models() {
-  local ep_raw
+  local ep_raw primary_key primary_url
+  CC_LAST_CPA_ENDPOINT=""
+  CC_LAST_CPA_ENDPOINT_LABEL=""
+  CC_LAST_CPA_API_KEY=""
   ep_raw="$(__cc_resolve_endpoint)"
-  local api_key="${ep_raw##*|}"
-  local cpa_url="${ep_raw%|*}"
+  primary_key="${ep_raw##*|}"
+  primary_url="${ep_raw%|*}"
 
-  [[ -z "$cpa_url" || -z "$api_key" ]] && return 1
+  local candidates="" norm
+  if [[ -n "$primary_url" ]]; then
+    norm="$(__cc_normalize_endpoint "$primary_url" 2>/dev/null)" || norm=""
+    [[ -n "$norm" ]] && candidates="primary|${norm%%|*}|${norm#*|}|$primary_key"$'\n'
+  fi
+  candidates+="$(__cc_resolve_fallbacks)"
 
-  local response
-  response="$(curl -s --connect-timeout 5 --max-time 15 "$cpa_url" \
-    -H "Authorization: Bearer $api_key" \
-    -H "Content-Type: application/json")" || return 1
+  local body_file
+  body_file="$(mktemp 2>/dev/null || echo "/tmp/.cc_models.$$")"
+  local label base models key code last_error="" rc=1
 
-  echo "$response" | __cc_parse_cpa_response || return 1
+  while IFS='|' read -r label base models key; do
+    [[ -z "$models" ]] && continue
+    if [[ -z "$key" ]]; then
+      last_error="$label $models: no API key"
+      continue
+    fi
+
+    code="$(curl -s -o "$body_file" -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+      "$models" -H "Authorization: Bearer $key" -H "Content-Type: application/json" 2>/dev/null)" || code="000"
+
+    case "$code" in
+      000|5??)
+        # No answer, or the relay itself is broken → the next endpoint may be fine.
+        last_error="${last_error:+$last_error | }$label $models: HTTP $code"
+        continue
+        ;;
+    esac
+
+    if [[ "$code" != 2?? ]]; then
+      # Real answer from the server: report it rather than hiding it behind a fallback.
+      echo "$label $models: HTTP $code" >&2
+      last_error="${last_error:+$last_error | }$label $models: HTTP $code"
+      rc=1
+      break
+    fi
+
+    CC_LAST_CPA_ENDPOINT="$base"
+    CC_LAST_CPA_ENDPOINT_LABEL="$label"
+    CC_LAST_CPA_API_KEY="$key"
+    __cc_parse_cpa_response < "$body_file"
+    rc=$?
+    break
+  done <<< "$candidates"
+
+  rm -f "$body_file" 2>/dev/null
+  if [[ -z "$CC_LAST_CPA_ENDPOINT" ]]; then
+    [[ -n "$last_error" ]] && echo "No CPA endpoint answered: $last_error" >&2
+    return 1
+  fi
+  return $rc
 }
 
 # ─── Model Categorization (Python helper, used by __cc_auto_assign and menu) ───
@@ -1287,8 +1395,25 @@ for m in sorted(d.get('availableModels',[]) or []):
   local total=0 healthy=0 quota=0 failed=0
   local failed_models=()
 
+  # Read-only failover: probe once, then test every model against the endpoint that
+  # actually answers. __cc_test_model_health prefers CC_ACTIVE_* over the raw env.
+  # Kept out of a subshell so the CC_LAST_CPA_* globals survive.
+  CC_ACTIVE_BASE_URL=""
+  CC_ACTIVE_API_KEY=""
+  if __cc_fetch_cpa_models >/dev/null 2>&1; then
+    CC_ACTIVE_BASE_URL="$CC_LAST_CPA_ENDPOINT"
+    CC_ACTIVE_API_KEY="$CC_LAST_CPA_API_KEY"
+  fi
+
   echo ""
   echo "=== Model Health Test ==="
+  if [[ -n "$CC_ACTIVE_BASE_URL" ]]; then
+    echo "  Endpoint: $CC_ACTIVE_BASE_URL"
+    [[ "$CC_LAST_CPA_ENDPOINT_LABEL" != "primary" ]] && \
+      echo "  Fallback: $CC_LAST_CPA_ENDPOINT_LABEL - primary endpoint did not answer"
+  else
+    echo "  Warning : no endpoint answered the probe; testing the primary only"
+  fi
   echo "  Testing $(( $(echo "$models" | wc -l | tr -d ' ') )) models (timeout: ${timeout_sec}s)..."
   echo ""
 
@@ -1304,10 +1429,11 @@ for m in sorted(d.get('availableModels',[]) or []):
       # Distinguish quota vs generic failure by checking response
       local ep_raw base_url api_key
       ep_raw="$(__cc_resolve_endpoint)"
-      api_key="${ep_raw##*|}"
-      base_url="${ANTHROPIC_BASE_URL:-}"
+      api_key="${CC_ACTIVE_API_KEY:-${ep_raw##*|}}"
+      base_url="${CC_ACTIVE_BASE_URL:-${ANTHROPIC_BASE_URL:-}}"
       [[ -z "$base_url" ]] && base_url="${ep_raw%|*}"
       base_url="${base_url%/v1/models}"
+      base_url="${base_url%/}"
       local body="{\"model\":\"$model\",\"system\":\"You are a helpful assistant.\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}"
       local resp
       resp="$(curl -s --connect-timeout 5 --max-time 5 -X POST "${base_url%/}/v1/messages" \
@@ -1352,6 +1478,10 @@ json.dump(d,sys.stdout,indent=2,ensure_ascii=False)
 
   echo ""
   echo "Tip: cc-test -RemoveDead    Remove failed models"
+
+  # Do not leak the probe result into later commands (cc / cc-sync resolve their own).
+  CC_ACTIVE_BASE_URL=""
+  CC_ACTIVE_API_KEY=""
 }
 
 # === CPA ENDPOINT SWITCHING ===
@@ -1446,7 +1576,7 @@ cc-sync() {
     esac
   done
 
-  # Use unified endpoint resolver
+  # Primary endpoint first, then $CPA_FALLBACK_URLS (see __cc_fetch_cpa_models)
   local ep_raw
   ep_raw="$(__cc_resolve_endpoint)"
   local api_key="${ep_raw##*|}"
@@ -1458,6 +1588,7 @@ cc-sync() {
     echo "  Fix (recommended) — add both lines to $CC_ENV_PATH:" >&2
     echo "    CPA_MODELS_URL=https://your-cpa-proxy/v1/models" >&2
     echo "    CPA_API_KEY=<your-cpa-key>" >&2
+    echo "  Optional backup: CPA_FALLBACK_URLS=http://host:3000/v1[;http://other:3000]" >&2
     echo "  Then re-run: cc-sync" >&2
     return 1
   fi
@@ -1465,20 +1596,21 @@ cc-sync() {
   echo "Fetching models from CPA..."
   echo "  ${cpa_url%/v1/models}"
 
-  local response
-  response="$(curl -s --connect-timeout 5 --max-time 15 "$cpa_url" \
-    -H "Authorization: Bearer $api_key" \
-    -H "Content-Type: application/json")" || {
-    echo "Error fetching CPA models: curl failed" >&2
-    return 1
-  }
-
   # Raw provider IDs, verbatim — no alias rewrite, no prefix filtering.
-  local cpa_models
-  cpa_models="$(echo "$response" | __cc_parse_cpa_response)" || {
-    echo "Error: unexpected CPA response format." >&2
+  # No command substitution here: it would run the fetch in a subshell and lose the
+  # CC_LAST_CPA_* globals that say which endpoint answered.
+  local cpa_models models_file
+  models_file="$(mktemp 2>/dev/null || echo "/tmp/.cc_models_out.$$")"
+  if ! __cc_fetch_cpa_models > "$models_file"; then
+    rm -f "$models_file" 2>/dev/null
+    echo "Error fetching CPA models: no reachable endpoint." >&2
     return 1
-  }
+  fi
+  cpa_models="$(cat "$models_file")"
+  rm -f "$models_file" 2>/dev/null
+  if [[ "$CC_LAST_CPA_ENDPOINT_LABEL" != "primary" ]]; then
+    echo "  Primary endpoint did not answer - using $CC_LAST_CPA_ENDPOINT_LABEL: $CC_LAST_CPA_ENDPOINT"
+  fi
   [[ -z "$cpa_models" ]] && { echo "Error: CPA returned no models." >&2; return 1; }
 
   local count

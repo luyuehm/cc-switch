@@ -564,6 +564,35 @@ attempt fails at the transport layer. Override the policy with `CC_PROXY`:
 macOS/Linux script uses `curl`, which only honours `HTTP(S)_PROXY` from the environment and is
 unaffected by the Windows system proxy.
 
+#### Fallback CPA endpoints
+
+When the primary endpoint is unreachable, read-only commands can walk a backup list instead of
+failing outright. Add one or more addresses to `~/.claude/cc-switch.env`:
+
+```bash
+# ';' or ',' separated. Each entry may be http://host, http://host/v1 or http://host/v1/models.
+CPA_FALLBACK_URLS=http://100.74.102.122:3000/v1
+# Optional: key for fallbacks that do not pin their own (defaults to the primary key)
+# CPA_FALLBACK_API_KEY=sk-ant-xxx
+# Per-entry key override:
+# CPA_FALLBACK_URLS=http://host:3000/v1|sk-ant-other;https://backup.example.com
+```
+
+Failover triggers on transport failure, timeout and 5xx — i.e. the relay is down or half-broken.
+A 4xx (bad key, wrong path, quota) is a real answer and is reported immediately; retrying another
+address would hide the misconfiguration.
+
+| Command | Walks the fallback list |
+|---------|-------------------------|
+| `cc-sync`, `cc-sync -List` | Yes — prints which endpoint answered when it is not the primary |
+| `cc-test` | Yes — probes once, then pings models against the endpoint that answered |
+| model list for auto-assignment (`cc`, `cc-config -Reset`) | Yes — list only; health probes still target the primary |
+| `cc <model>` launch | No — Claude Code always starts against `ANTHROPIC_BASE_URL` |
+
+Switching the address Claude Code launches with is a configuration change, not a retry, so it is
+left to you: change `ANTHROPIC_BASE_URL` (or the fallback entry's key) when you mean to move the
+runtime, not just to survive an outage.
+
 ### 5. Skill Menu Management
 
 | Command | Description |
@@ -797,6 +826,11 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 
 # Optional: separate endpoint for model list
 # CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
+
+# Optional: backup endpoints tried when the primary is unreachable (read-only commands).
+# ';' or ',' separated; host, /v1 or /v1/models all work; add "|key" to pin a key per entry.
+# CPA_FALLBACK_URLS=http://100.74.102.122:3000/v1
+# CPA_FALLBACK_API_KEY=sk-ant-xxx     # for fallbacks without their own key
 
 # Optional (Windows/PowerShell): proxy policy for CPA requests
 # CC_PROXY=http://127.0.0.1:7890   # always proxy
