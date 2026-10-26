@@ -543,6 +543,27 @@ cc-sync
 | `-Remove` | Remove models no longer on CPA |
 | `-Reassign` | Sync + re-assign task models |
 
+#### Proxy handling (Windows / PowerShell)
+
+`cc-sync` does **not** inherit the Windows system proxy quietly. A local Clash / V2Ray /
+Shadowsocks instance running in "system proxy" mode is tuned for browser traffic and can stall or
+truncate the CPA `/v1/models` body (chunked, tens of KB). That surfaces as
+`Error fetching CPA models: Received an unexpected EOF or 0 bytes from the transport stream.` or a
+bare timeout, even though the same endpoint answers in milliseconds to `curl`.
+
+The request therefore goes **direct first** and only falls back to the system proxy when the direct
+attempt fails at the transport layer. Override the policy with `CC_PROXY`:
+
+| `CC_PROXY` | Behaviour |
+|------------|-----------|
+| unset | Direct first, then the system proxy |
+| `<url>` | Always use that proxy (e.g. `http://127.0.0.1:7890`) |
+| `none` / `off` | Direct only, never a proxy |
+
+`cc-test` follows the same policy (it uses the direct route unless `CC_PROXY=<url>` is set). The
+macOS/Linux script uses `curl`, which only honours `HTTP(S)_PROXY` from the environment and is
+unaffected by the Windows system proxy.
+
 ### 5. Skill Menu Management
 
 | Command | Description |
@@ -776,6 +797,10 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 
 # Optional: separate endpoint for model list
 # CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
+
+# Optional (Windows/PowerShell): proxy policy for CPA requests
+# CC_PROXY=http://127.0.0.1:7890   # always proxy
+# CC_PROXY=none                    # never proxy
 ```
 
 ### `settings.json` (auto-managed by cc-switch)

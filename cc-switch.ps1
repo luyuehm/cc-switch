@@ -87,6 +87,125 @@ function Resolve-CPAEndpoint {
     return @{ Url = $cpaUrl; ApiKey = $apiKey }
 }
 
+# === HTTP TRANSPORT ===
+
+<#
+.SYNOPSIS
+    Perform an HTTP request without silently inheriting the Windows system proxy.
+
+.DESCRIPTION
+    Invoke-RestMethod routes through the Windows system proxy (what Clash/V2Ray/Shadowsocks switch
+    on in "system proxy" mode). Those local proxies are tuned for browser traffic and can stall or
+    cut short a chunked JSON body of a few tens of KB, which surfaces as
+    "Received an unexpected EOF or 0 bytes from the transport stream" or a bare timeout — even
+    though the same endpoint answers in ~100 ms when curl talks to it directly.
+
+    Proxy policy, overridable with the CC_PROXY environment variable:
+      CC_PROXY unset     try direct first, then the system proxy if one is configured
+      CC_PROXY=<url>     always use this proxy (for example http://127.0.0.1:7890)
+      CC_PROXY=none      never use a proxy
+
+    An HTTP status from the server (401/429/5xx) is a real answer and is never retried elsewhere.
+#>
+function Invoke-CCHttp {
+    param(
+        [Parameter(Mandatory)][string]$Uri,
+        [ValidateSet('GET', 'POST')][string]$Method = 'GET',
+        [hashtable]$Headers = @{},
+        [string]$Body,
+        [string]$ContentType = 'application/json',
+        [int]$TimeoutSec = 15
+    )
+
+    $attempts = @()
+    $forced = $env:CC_PROXY
+    if ($forced -match '^(none|off|direct|no)$') {
+        $attempts = @(@{ Label = 'direct'; Proxy = $null })
+    } elseif ($forced) {
+        $attempts = @(@{ Label = "CC_PROXY $forced"; Proxy = [System.Net.WebProxy]::new($forced) })
+    } else {
+        $attempts = @(@{ Label = 'direct'; Proxy = $null })
+        try {
+            $systemProxy = [System.Net.WebRequest]::GetSystemWebProxy()
+            $proxied = $systemProxy.GetProxy([uri]$Uri).AbsoluteUri
+            if ($proxied -and $proxied -ne ([uri]$Uri).AbsoluteUri) {
+                $attempts += @{ Label = "system proxy $proxied"; Proxy = $systemProxy }
+            }
+        } catch {
+            # An unreadable proxy configuration is not a reason to fail; stay direct.
+        }
+    }
+
+    $failures = @()
+    foreach ($attempt in $attempts) {
+        try {
+            return Invoke-CCHttpOnce -Uri $Uri -Method $Method -Headers $Headers -Body $Body `
+                -ContentType $ContentType -TimeoutSec $TimeoutSec -Proxy $attempt.Proxy
+        } catch {
+            # .NET method failures arrive wrapped in MethodInvocationException; unwrap before classifying.
+            $ex = $_.Exception
+            if ($ex -is [System.Management.Automation.MethodInvocationException] -and $ex.InnerException) {
+                $ex = $ex.InnerException
+            }
+            # A server-side answer (status code) is authoritative — do not repeat it over another route.
+            if ($ex -is [System.Net.WebException] -and $ex.Response) { throw $ex }
+            $failures += "$($attempt.Label): $($ex.Message)"
+        }
+    }
+
+    $hint = if ($attempts.Count -gt 1) {
+        ' Set CC_PROXY=none to force a direct connection, or CC_PROXY=<url> to force a proxy.'
+    } else { '' }
+    throw ("Request to $Uri failed. " + ($failures -join ' | ') + $hint)
+}
+
+# Single attempt used by Invoke-CCHttp. Kept separate so the retry loop stays readable.
+function Invoke-CCHttpOnce {
+    param(
+        [string]$Uri,
+        [string]$Method,
+        [hashtable]$Headers,
+        [string]$Body,
+        [string]$ContentType,
+        [int]$TimeoutSec,
+        $Proxy
+    )
+
+    $timeoutMs = [Math]::Max($TimeoutSec, 1) * 1000
+    $request = [System.Net.WebRequest]::Create($Uri)
+    $request.Method = $Method
+    $request.Timeout = $timeoutMs
+    $request.ReadWriteTimeout = $timeoutMs
+    $request.Proxy = $Proxy
+    # A reused socket from a previous attempt may already be half-closed; start clean every time.
+    $request.KeepAlive = $false
+
+    foreach ($name in $Headers.Keys) {
+        if ($name -ieq 'Content-Type') { $request.ContentType = [string]$Headers[$name]; continue }
+        try { $request.Headers[$name] = [string]$Headers[$name] } catch { }
+    }
+
+    if ($Body) {
+        if (-not $request.ContentType) { $request.ContentType = $ContentType }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        $request.ContentLength = $bytes.Length
+        $stream = $request.GetRequestStream()
+        try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+    }
+
+    # Throws WebException (with .Response) on a non-2xx status; callers rely on that.
+    $response = $request.GetResponse()
+    try {
+        $reader = [System.IO.StreamReader]::new($response.GetResponseStream(), [System.Text.Encoding]::UTF8)
+        try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally {
+        $response.Dispose()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    return $text | ConvertFrom-Json
+}
+
 # === MODEL CATEGORIZATION HELPERS ===
 
 <#
@@ -190,10 +309,10 @@ function Get-CPAModelList {
     if (-not $ep.Url -or -not $ep.ApiKey) { return $null }
 
     try {
-        $response = Invoke-RestMethod -Uri $ep.Url -Headers @{
+        $response = Invoke-CCHttp -Uri $ep.Url -Headers @{
             "Authorization" = "Bearer $($ep.ApiKey)"
             "Content-Type" = "application/json"
-        } -TimeoutSec 10 -ErrorAction Stop
+        } -TimeoutSec 10
 
         $models = if ($response.data) {
             $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
@@ -247,13 +366,12 @@ function Test-ModelHealth {
     } | ConvertTo-Json
 
     try {
-        $response = Invoke-RestMethod -Uri "$baseUrl/v1/messages" `
+        $response = Invoke-CCHttp -Uri "$baseUrl/v1/messages" `
             -Method Post `
             -Headers $headers `
             -Body $body `
             -ContentType "application/json" `
-            -TimeoutSec $Timeout `
-            -ErrorAction Stop
+            -TimeoutSec $Timeout
 
         # Also check response body for hidden error indicators (some proxies return 200 with error body)
         $bodyText = if ($response) { $response | ConvertTo-Json -Compress -Depth 3 } else { "" }
@@ -794,10 +912,10 @@ function global:cc-sync {
     Write-Host "  $cpaUrl" -ForegroundColor Gray
 
     try {
-        $response = Invoke-RestMethod -Uri $cpaUrl -Headers @{
+        $response = Invoke-CCHttp -Uri $cpaUrl -Headers @{
             "Authorization" = "Bearer $apiKey"
             "Content-Type" = "application/json"
-        } -TimeoutSec 15 -ErrorAction Stop
+        } -TimeoutSec 15
 
         $cpaModels = if ($response.data) {
             $response.data | ForEach-Object { $_.id } | Where-Object { $_ }
@@ -988,11 +1106,19 @@ function global:cc-test {
 
     $results = [System.Collections.Concurrent.ConcurrentBag[hashtable]]::new()
 
+    # Proxy policy for the parallel pings (a function cannot cross the runspace boundary, so the
+    # decision is made here and splatted inside). Same intent as Invoke-CCHttp: direct by default.
+    $proxyArgs = @{ NoProxy = $true }
+    if ($env:CC_PROXY -and $env:CC_PROXY -notmatch '^(none|off|direct|no)$') {
+        $proxyArgs = @{ Proxy = $env:CC_PROXY }
+    }
+
     $models | ForEach-Object -Parallel {
         $modelName = $_
         $baseUrl = $using:baseUrl
         $headers = $using:headers
         $timeout = $using:Timeout
+        $proxyArgs = $using:proxyArgs
         $results = $using:results
 
         $body = @{
@@ -1007,6 +1133,7 @@ function global:cc-test {
                 -Headers $headers `
                 -Body $body `
                 -ContentType "application/json" `
+                @proxyArgs `
                 -TimeoutSec $timeout `
                 -ErrorAction Stop
 
