@@ -74,6 +74,11 @@ __cc_load_env() {
   [[ "${CC_SWITCH_SKIP_ENV:-0}" == "1" ]] && return
   while IFS='=' read -r key val; do
     key="${key#"${key%%[![:space:]]*}"}"
+    # A file saved on Windows carries a UTF-8 BOM on its first line and CRLF line
+    # endings. Both must go: a BOM makes the first key unexportable, and a trailing
+    # CR turns ANTHROPIC_BASE_URL into "...\r" so every request path is malformed.
+    key="${key#$'\xef\xbb\xbf'}"
+    val="${val%$'\r'}"
     [[ -z "$key" || "$key" =~ ^# ]] && continue
     export "$key=$val"
   done < "$CC_ENV_PATH"
@@ -1414,6 +1419,33 @@ for m in sorted(d.get('availableModels',[]) or []):
   else
     echo "  Warning : no endpoint answered the probe; testing the primary only"
   fi
+
+  # -RemoveDead edits availableModels from the probe results. Probing through a fallback
+  # would delete every model that the fallback does not serve, so that path is primary-only.
+  if [[ "$remove_dead" -eq 1 && -z "${CC_ALLOW_FALLBACK_WRITE:-}" ]]; then
+    local guard_blocked=0
+    if [[ -z "$CC_ACTIVE_BASE_URL" ]]; then
+      # No endpoint answered: every probe fails, so -RemoveDead would wipe the list.
+      guard_blocked=1
+      echo "" >&2
+      echo "Refusing to remove models: no endpoint answered the probe." >&2
+      echo "  Every health check would fail, so -RemoveDead would delete every model." >&2
+      echo "  Restore the endpoint first: cc-sync -List tells you which one answers." >&2
+    elif [[ "$CC_LAST_CPA_ENDPOINT_LABEL" != "primary" ]]; then
+      guard_blocked=1
+      echo "" >&2
+      echo "Refusing to remove models: the probe would run against $CC_LAST_CPA_ENDPOINT_LABEL, not the primary." >&2
+      echo "  A backup endpoint can serve a different model catalog, so this would delete models that still exist on the primary." >&2
+      echo "  cc-test without -RemoveDead still uses the fallback." >&2
+      echo "  To proceed anyway: CC_ALLOW_FALLBACK_WRITE=1 cc-test -RemoveDead" >&2
+    fi
+    if [[ "$guard_blocked" -eq 1 ]]; then
+      CC_ACTIVE_BASE_URL=""
+      CC_ACTIVE_API_KEY=""
+      return 1
+    fi
+  fi
+
   echo "  Testing $(( $(echo "$models" | wc -l | tr -d ' ') )) models (timeout: ${timeout_sec}s)..."
   echo ""
 
@@ -1657,6 +1689,19 @@ cc-sync() {
     fi
     __cc_sync_health_report "$health_ids"
     return $?
+  fi
+
+  # Syncing writes availableModels: new models are added and, with --remove, local models
+  # missing from the fetched list are deleted. A backup endpoint can expose a different
+  # catalog, so a sync from it would delete models that still exist on the primary.
+  if [[ "$CC_LAST_CPA_ENDPOINT_LABEL" != "primary" && -z "${CC_ALLOW_FALLBACK_WRITE:-}" ]]; then
+    echo "" >&2
+    echo "Refusing to sync from $CC_LAST_CPA_ENDPOINT_LABEL: it is not the primary endpoint." >&2
+    echo "  Backup endpoints may serve a different model catalog, so syncing would add foreign models" >&2
+    echo "  and remove models that still exist on the primary." >&2
+    echo "  Read-only commands still work: cc-sync -List, cc-test." >&2
+    echo "  To sync anyway: CC_ALLOW_FALLBACK_WRITE=1 cc-sync" >&2
+    return 1
   fi
 
   local json

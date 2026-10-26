@@ -571,7 +571,7 @@ failing outright. Add one or more addresses to `~/.claude/cc-switch.env`:
 
 ```bash
 # ';' or ',' separated. Each entry may be http://host, http://host/v1 or http://host/v1/models.
-CPA_FALLBACK_URLS=http://100.74.102.122:3000/v1
+CPA_FALLBACK_URLS=http://your-backup-cpa:3000/v1
 # Optional: key for fallbacks that do not pin their own (defaults to the primary key)
 # CPA_FALLBACK_API_KEY=sk-ant-xxx
 # Per-entry key override:
@@ -584,10 +584,32 @@ address would hide the misconfiguration.
 
 | Command | Walks the fallback list |
 |---------|-------------------------|
-| `cc-sync`, `cc-sync -List` | Yes — prints which endpoint answered when it is not the primary |
-| `cc-test` | Yes — probes once, then pings models against the endpoint that answered |
+| `cc-sync -List`, `cc-test` | Yes — prints which endpoint answered when it is not the primary |
 | model list for auto-assignment (`cc`, `cc-config -Reset`) | Yes — list only; health probes still target the primary |
+| `cc-sync` (add / `-Remove`) | **No** — a sync writes `availableModels` |
+| `cc-test -RemoveDead` | **No** — removing models is a write |
 | `cc <model>` launch | No — Claude Code always starts against `ANTHROPIC_BASE_URL` |
+
+A backup endpoint can serve a *different* model catalog (a mirror, a different gateway). Syncing
+against it would add models the primary does not have and delete models it still does, so the write
+paths above stay bound to the primary and refuse to run against a fallback:
+
+```
+Refusing to sync from fallback-1: it is not the primary endpoint.
+```
+
+`cc-test -RemoveDead` additionally refuses when no endpoint answered at all, because every probe
+would fail and the whole list would be deleted. Read-only inspection still works during an outage.
+
+To force a sync from the fallback anyway (e.g. the fallback is a true mirror of the same relay):
+
+```bash
+CC_ALLOW_FALLBACK_WRITE=1 cc-sync -Remove      # bash / zsh
+```
+
+```powershell
+$env:CC_ALLOW_FALLBACK_WRITE = 1; cc-sync -Remove   # PowerShell
+```
 
 Switching the address Claude Code launches with is a configuration change, not a retry, so it is
 left to you: change `ANTHROPIC_BASE_URL` (or the fallback entry's key) when you mean to move the
@@ -829,7 +851,7 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 
 # Optional: backup endpoints tried when the primary is unreachable (read-only commands).
 # ';' or ',' separated; host, /v1 or /v1/models all work; add "|key" to pin a key per entry.
-# CPA_FALLBACK_URLS=http://100.74.102.122:3000/v1
+# CPA_FALLBACK_URLS=http://your-backup-cpa:3000/v1
 # CPA_FALLBACK_API_KEY=sk-ant-xxx     # for fallbacks without their own key
 
 # Optional (Windows/PowerShell): proxy policy for CPA requests

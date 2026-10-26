@@ -1127,6 +1127,19 @@ function global:cc-sync {
         return
     }
 
+    # Syncing writes availableModels: new models are added and, with -Remove, local models
+    # missing from the fetched list are deleted. A backup endpoint can expose a different
+    # catalog, so a sync from it would delete models that still exist on the primary.
+    if ($endpoint.Label -ne 'primary' -and -not $env:CC_ALLOW_FALLBACK_WRITE) {
+        Write-Host ""
+        Write-Host "Refusing to sync from $($endpoint.Label): it is not the primary endpoint." -ForegroundColor Red
+        Write-Host "  Backup endpoints may serve a different model catalog, so syncing would add foreign models" -ForegroundColor Yellow
+        Write-Host "  and remove models that still exist on the primary." -ForegroundColor Yellow
+        Write-Host "  Read-only commands still work: cc-sync -List, cc-test." -ForegroundColor Yellow
+        Write-Host "  To sync anyway: `$env:CC_ALLOW_FALLBACK_WRITE = 1" -ForegroundColor Yellow
+        return
+    }
+
     $json = Get-CCSettings
     if (-not $json) { return }
 
@@ -1262,6 +1275,26 @@ function global:cc-test {
     if (-not $baseUrl -or -not $apiKey) {
         Write-Host "Error: ANTHROPIC_BASE_URL or API key not configured." -ForegroundColor Red
         return
+    }
+
+    # -RemoveDead edits availableModels from the probe results. Probing through a fallback
+    # would delete every model that the fallback does not serve, so that path is primary-only.
+    if ($RemoveDead -and -not $env:CC_ALLOW_FALLBACK_WRITE) {
+        if (-not $ep.Reachable) {
+            Write-Host ""
+            Write-Host "Refusing to remove models: no endpoint answered the probe." -ForegroundColor Red
+            Write-Host "  Every health check would fail, so -RemoveDead would delete every model." -ForegroundColor Yellow
+            Write-Host "  Restore the endpoint first: cc-sync -List tells you which one answers." -ForegroundColor Yellow
+            return
+        }
+        if ($ep.Label -ne 'primary') {
+            Write-Host ""
+            Write-Host "Refusing to remove models: the probe would run against $($ep.Label), not the primary." -ForegroundColor Red
+            Write-Host "  A backup endpoint can serve a different model catalog, so this would delete models that still exist on the primary." -ForegroundColor Yellow
+            Write-Host "  cc-test without -RemoveDead still uses the fallback." -ForegroundColor Yellow
+            Write-Host "  To proceed anyway: `$env:CC_ALLOW_FALLBACK_WRITE = 1" -ForegroundColor Yellow
+            return
+        }
     }
 
     $headers = @{
