@@ -486,6 +486,11 @@ cc-run image       # image generation
 
 **Health-aware fallback:** Before launching, `cc-run` **bypasses the health cache** (always does a fresh probe) to catch rate-limited or stale models. If the assigned model is unresponsive, it searches for a healthy fallback within the same vendor category first, then across all available models (also bypassing cache at each step).
 
+`cc-run` also accepts a model name instead of a task (`cc-run a-deepseek-flash`). A name that is
+neither a task nor a model in `availableModels` is rejected with the task list and a "did you mean"
+hint, rather than being probed model-by-model: a typo like `cc-run defualt` used to walk the entire
+list and then launch an unrelated model.
+
 View and override with `cc-config`:
 
 ```powershell
@@ -632,6 +637,11 @@ Claude Code -> 127.0.0.1:18317 (cpa-failover) -> primary CPA
 - The proxy always connects directly — Node 24's `NODE_USE_ENV_PROXY`/`HTTP_PROXY` would otherwise
   push a tailnet backup through the local Clash proxy and turn it into a 502.
 - Config comes from `cc-switch.env` (`ANTHROPIC_BASE_URL`, key, `CPA_FALLBACK_URLS`), same as cc-sync.
+- The override is written to `~/.claude/cc-failover.settings.json` and passed as `--settings <path>`.
+  An inline JSON string does not survive the trip to the executable: PowerShell drops the embedded
+  `"` characters, so Claude Code receives `{env:{...}}` and exits with
+  `Error: Invalid JSON provided to --settings` (on 5.1 and 7.x, with either `claude.exe` or the npm
+  `claude.cmd` shim). Keep passing a path if you wire this up yourself.
 
 | Command | Description |
 |---------|-------------|

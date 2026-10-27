@@ -394,6 +394,35 @@ function Get-CCFailoverBaseUrl {
     return "http://127.0.0.1:$script:CC_FAILOVER_PORT"
 }
 
+<#
+.SYNOPSIS
+    Write the failover override to a settings file and return its path.
+.DESCRIPTION
+    `--settings` accepts a file path or a JSON string, and only the path survives the trip
+    through PowerShell. When calling a native executable, PowerShell strips the embedded
+    double quotes of an argument, so `--settings '{"env":{...}}'` arrives as
+    `{env:{...}}` and Claude Code exits with "Invalid JSON provided to --settings"
+    (reproducible on 5.1 and 7.x, and regardless of whether the launcher is claude.exe or
+    the npm claude.cmd shim). A path has no quotes, no spaces and no escaping.
+
+    Returns $null when the file cannot be written; the caller then launches without the
+    proxy rather than passing settings that are known to be mangled.
+#>
+function Write-CCFailoverSettingsFile {
+    param([Parameter(Mandatory)][string]$BaseUrl)
+
+    $path = Join-Path (Split-Path -Parent $script:CC_SETTINGS_PATH) 'cc-failover.settings.json'
+    $body = @{ env = @{ ANTHROPIC_BASE_URL = $BaseUrl } } | ConvertTo-Json -Compress -Depth 4
+    try {
+        # Claude Code reads this before the session starts; no BOM so it parses as UTF-8 JSON.
+        [IO.File]::WriteAllText($path, $body, (New-Object System.Text.UTF8Encoding($false)))
+        return $path
+    } catch {
+        Write-Host "[cc] Could not write $path : $($_.Exception.Message)" -ForegroundColor Yellow
+        return $null
+    }
+}
+
 function Test-CCFailoverProxy {
     try {
         $r = Invoke-WebRequest -UseBasicParsing -Uri "$(Get-CCFailoverBaseUrl)/__failover/health" -TimeoutSec 2
@@ -1099,8 +1128,12 @@ function global:cc {
     Save-CCSettings $json
 
     Write-Host "OK: Model switched" -ForegroundColor Green
-    Write-Host "  Old: $oldModel" -ForegroundColor Gray
-    Write-Host "  New: $Model" -ForegroundColor Green
+    if ($oldModel -and $oldModel -ne $Model) {
+        Write-Host "  Old: $oldModel" -ForegroundColor Gray
+        Write-Host "  New: $Model" -ForegroundColor Green
+    } else {
+        Write-Host "  Model: $Model (unchanged)" -ForegroundColor Green
+    }
     Write-Host ""
 
     # Launch Claude Code with API key from .env or settings.json
@@ -1132,13 +1165,18 @@ function global:cc {
     # Route the session through the local failover proxy when it is available.
     # Claude Code's settings.json env wins over the inherited environment, so the
     # override has to travel as --settings (highest precedence), not as $env:*.
+    # It goes as a file: an inline JSON string loses its quotes on the way to the exe.
     $launchArgs = @('--bare')
     if (Start-CCFailoverProxy) {
         $failoverBase = Get-CCFailoverBaseUrl
-        $override = @{ env = @{ ANTHROPIC_BASE_URL = $failoverBase } } | ConvertTo-Json -Compress -Depth 4
-        $launchArgs += @('--settings', $override)
-        Write-Host "Failover: $failoverBase -> $($env:ANTHROPIC_BASE_URL)" -ForegroundColor DarkGray
-        Write-Host "          (cc-failover status to inspect, cc-failover stop to disable)" -ForegroundColor DarkGray
+        $overrideFile = Write-CCFailoverSettingsFile -BaseUrl $failoverBase
+        if ($overrideFile) {
+            $launchArgs += @('--settings', $overrideFile)
+            Write-Host "Failover: $failoverBase -> $($env:ANTHROPIC_BASE_URL)" -ForegroundColor DarkGray
+            Write-Host "          (cc-failover status to inspect, cc-failover stop to disable)" -ForegroundColor DarkGray
+        } else {
+            Write-Host "[cc] Runtime failover could not be wired up; using $($env:ANTHROPIC_BASE_URL) directly" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "[cc] Runtime failover unavailable; using $($env:ANTHROPIC_BASE_URL) directly" -ForegroundColor Yellow
     }
@@ -1158,6 +1196,25 @@ function global:cc-pro {
     $model = if ($json -and $json.taskModels -and $json.taskModels.code) { $json.taskModels.code } else { "claude-opus-4-7" }
     Write-Host "Switching to $model (code task)..." -ForegroundColor Cyan
     cc $model
+}
+
+# Levenshtein distance, used only to suggest a name the user probably meant.
+function Get-CCEditDistance {
+    param([string]$A, [string]$B)
+    $a = $A.ToLowerInvariant()
+    $b = $B.ToLowerInvariant()
+    $prev = New-Object 'int[]' ($b.Length + 1)
+    for ($j = 0; $j -le $b.Length; $j++) { $prev[$j] = $j }
+    for ($i = 1; $i -le $a.Length; $i++) {
+        $cur = New-Object 'int[]' ($b.Length + 1)
+        $cur[0] = $i
+        for ($j = 1; $j -le $b.Length; $j++) {
+            $cost = if ($a[$i - 1] -eq $b[$j - 1]) { 0 } else { 1 }
+            $cur[$j] = [Math]::Min([Math]::Min($prev[$j] + 1, $cur[$j - 1] + 1), $prev[$j - 1] + $cost)
+        }
+        $prev = $cur
+    }
+    return $prev[$b.Length]
 }
 
 function global:cc-run {
@@ -1205,7 +1262,29 @@ function global:cc-run {
         $model = $modelMap[$Task]
         Write-Host "[cc-run] Task '$Task' → model: $model" -ForegroundColor Cyan
     } else {
+        # Anything that is not a task key is treated as a model name — including typos.
+        # 'cc-run defualt' used to fall through to the model branch, fail its health
+        # check, and then probe every model in the list one by one, which looks like a
+        # hang and ends up launching some unrelated model. Reject unknown names instead.
         $model = $Task
+        if ($json.availableModels -notcontains $model) {
+            Write-Host "[cc-run] Error: '$Task' is not a task and not a model in availableModels." -ForegroundColor Red
+            Write-Host "  tasks : $(@($modelMap.Keys | Sort-Object) -join ', ')" -ForegroundColor Gray
+
+            $suggestions = New-Object System.Collections.Generic.List[string]
+            foreach ($key in @($modelMap.Keys | Sort-Object)) {
+                if ((Get-CCEditDistance $Task $key) -le 2) { $suggestions.Add($key) }
+            }
+            foreach ($m in $json.availableModels) {
+                if ($suggestions.Count -ge 3) { break }
+                if ((Get-CCEditDistance $Task $m) -le 2) { $suggestions.Add($m) }
+            }
+            if ($suggestions.Count -gt 0) {
+                Write-Host "  Did you mean: $(($suggestions | Select-Object -Unique | Select-Object -First 3) -join ', ')" -ForegroundColor Yellow
+            }
+            Write-Host "  Or run 'cc-test' to list healthy models." -ForegroundColor Gray
+            return
+        }
         Write-Host "[cc-run] Direct model: $model" -ForegroundColor Cyan
     }
 
