@@ -588,7 +588,7 @@ address would hide the misconfiguration.
 | model list for auto-assignment (`cc`, `cc-config -Reset`) | Yes — list only; health probes still target the primary |
 | `cc-sync` (add / `-Remove`) | **No** — a sync writes `availableModels` |
 | `cc-test -RemoveDead` | **No** — removing models is a write |
-| `cc <model>` launch | No — Claude Code always starts against `ANTHROPIC_BASE_URL` |
+| `cc <model>` launch | Indirect — health checks use the live endpoint; `cc` then launches through the runtime failover proxy below |
 
 A backup endpoint can serve a *different* model catalog (a mirror, a different gateway). Syncing
 against it would add models the primary does not have and delete models it still does, so the write
@@ -611,9 +611,39 @@ CC_ALLOW_FALLBACK_WRITE=1 cc-sync -Remove      # bash / zsh
 $env:CC_ALLOW_FALLBACK_WRITE = 1; cc-sync -Remove   # PowerShell
 ```
 
-Switching the address Claude Code launches with is a configuration change, not a retry, so it is
-left to you: change `ANTHROPIC_BASE_URL` (or the fallback entry's key) when you mean to move the
-runtime, not just to survive an outage.
+#### Runtime failover proxy (`cc-failover`)
+
+The fallback list above only keeps **read-only probes** alive. Claude Code itself accepts a single
+`ANTHROPIC_BASE_URL`, so a primary that dies mid-session used to kill the session even though a
+healthy backup was configured. `cc` now starts a localhost proxy (`~/.claude/cpa-failover.js`,
+Node 18+) and launches Claude Code against it with `--settings`:
+
+```
+Claude Code -> 127.0.0.1:18317 (cpa-failover) -> primary CPA
+                                              \-> CPA_FALLBACK_URLS on error
+```
+
+- Retries on transport failure, timeout, 404, 429 and 5xx; a 4xx other than 404 is returned as-is.
+- A failed endpoint is cooled down (`CPA_FAILOVER_COOLDOWN_MS`, default 30s) and then probed again,
+  so traffic returns to the primary automatically once it recovers.
+- Requests are buffered and replayed on the next endpoint; responses (including SSE streaming) are
+  piped through unchanged. Streaming that breaks after the first byte cannot be replayed.
+- The proxy always connects directly — Node 24's `NODE_USE_ENV_PROXY`/`HTTP_PROXY` would otherwise
+  push a tailnet backup through the local Clash proxy and turn it into a 502.
+- Config comes from `cc-switch.env` (`ANTHROPIC_BASE_URL`, key, `CPA_FALLBACK_URLS`), same as cc-sync.
+
+| Command | Description |
+|---------|-------------|
+| `cc-failover` / `cc-failover status` | Endpoint states, failover counters, logon-task state |
+| `cc-failover start` / `stop` / `restart` | Control the local proxy |
+| `cc-failover reset` | Clear cooldown timers after fixing the primary |
+| `cc-failover install` | **Opt-in global mode**: point `settings.json` at the proxy and register a logon task so plain `claude` also fails over |
+| `cc-failover uninstall` | Restore `settings.json` and remove the logon task |
+
+Launcher mode (`cc`, `cc-run`) needs no persistent state. Global mode is the only way to cover a
+plain `claude` launch; without it, launch with `cc` to get failover.
+
+Logs: `~/.claude/logs/cpa-failover.log` (rotated at 5 MB).
 
 ### 5. Skill Menu Management
 

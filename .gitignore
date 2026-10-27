@@ -9,3 +9,6 @@ cpa-endpoints.json
 # Python cache
 __pycache__/
 *.pyc
+
+# Claude Code local settings (machine-specific permissions)
+.claude/settings.local.json

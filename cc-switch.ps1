@@ -6,6 +6,8 @@
 $script:CC_SETTINGS_PATH = "$env:USERPROFILE\.claude\settings.json"
 $script:CC_EXE_PATH = "$env:USERPROFILE\.local\bin\claude.exe"
 $script:CC_ENV_PATH = "$env:USERPROFILE\.claude\cc-switch.env"
+$script:CC_FAILOVER_SCRIPT = "$env:USERPROFILE\.claude\cpa-failover.js"
+$script:CC_FAILOVER_PORT = if ($env:CPA_FAILOVER_PORT) { [int]$env:CPA_FAILOVER_PORT } else { 18317 }
 $script:CC_FALLBACK_EXES = @(
     "$env:LOCALAPPDATA\Programs\claude\claude.exe",
     "$env:APPDATA\npm\claude.cmd"
@@ -379,6 +381,248 @@ function Get-CPActiveEndpoint {
     return $primary
 }
 
+# === RUNTIME FAILOVER PROXY (cpa-failover.js) ===
+#
+# cc-sync / cc-test walk CPA_FALLBACK_URLS, but Claude Code itself only knows one
+# ANTHROPIC_BASE_URL — when the primary died mid-session, the backup was never used.
+# cpa-failover.js is a localhost proxy that forwards to the primary and retries the
+# fallbacks on transport errors, 404/429/5xx, cooling the primary down before probing
+# it again. `cc` launches Claude Code against it via --settings, so a primary outage
+# (including one that starts after launch) degrades to the backup instead of failing.
+
+function Get-CCFailoverBaseUrl {
+    return "http://127.0.0.1:$script:CC_FAILOVER_PORT"
+}
+
+function Test-CCFailoverProxy {
+    try {
+        $r = Invoke-WebRequest -UseBasicParsing -Uri "$(Get-CCFailoverBaseUrl)/__failover/health" -TimeoutSec 2
+        return ($r.StatusCode -eq 200)
+    } catch {
+        return $false
+    }
+}
+
+function Find-CCNodeExe {
+    $cmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { return $cmd.Source }
+    foreach ($p in @("$env:ProgramFiles\nodejs\node.exe", "$env:LOCALAPPDATA\Programs\nodejs\node.exe")) {
+        if (Test-Path $p) { return $p }
+    }
+    return $null
+}
+
+<#
+.SYNOPSIS
+    Start the local failover proxy if it is not already running.
+.DESCRIPTION
+    Idempotent. Returns $true when the proxy answers /__failover/health. Returns $false
+    (without failing the caller) when node or cpa-failover.js is missing, so `cc` can
+    still launch directly against ANTHROPIC_BASE_URL.
+#>
+function Start-CCFailoverProxy {
+    if (Test-CCFailoverProxy) { return $true }
+
+    if (-not (Test-Path $script:CC_FAILOVER_SCRIPT)) {
+        Write-Host "[cc] cpa-failover.js not installed; running without runtime failover" -ForegroundColor Yellow
+        Write-Host "     Re-run install.ps1 to install it." -ForegroundColor Gray
+        return $false
+    }
+
+    $node = Find-CCNodeExe
+    if (-not $node) {
+        Write-Host "[cc] node.exe not found; running without runtime failover" -ForegroundColor Yellow
+        return $false
+    }
+
+    $logDir = "$env:USERPROFILE\.claude\logs"
+    if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+    $stdout = Join-Path $logDir "cpa-failover.stdout.log"
+    $stderr = Join-Path $logDir "cpa-failover.stderr.log"
+
+    $env:CPA_FAILOVER_PORT = "$script:CC_FAILOVER_PORT"
+    try {
+        Start-Process -FilePath $node -ArgumentList @("`"$script:CC_FAILOVER_SCRIPT`"") `
+            -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr | Out-Null
+    } catch {
+        Write-Host "[cc] Failed to start cpa-failover: $($_.Exception.Message)" -ForegroundColor Yellow
+        return $false
+    }
+
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 200
+        if (Test-CCFailoverProxy) { return $true }
+    }
+    Write-Host "[cc] cpa-failover did not become healthy; see $stderr" -ForegroundColor Yellow
+    return (Test-CCFailoverProxy)
+}
+
+function Stop-CCFailoverProxy {
+    $pidFile = "$env:USERPROFILE\.claude\cpa-failover.pid"
+    if (Test-Path $pidFile) {
+        $proxyPid = (Get-Content $pidFile -Raw).Trim()
+        if ($proxyPid) {
+            Stop-Process -Id ([int]$proxyPid) -Force -ErrorAction SilentlyContinue
+            Remove-Item $pidFile -ErrorAction SilentlyContinue
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-CCFailoverStatus {
+    try {
+        return Invoke-RestMethod -Uri "$(Get-CCFailoverBaseUrl)/__failover/status" -TimeoutSec 3
+    } catch {
+        return $null
+    }
+}
+
+$script:CC_FAILOVER_TASK = 'cc-switch-cpa-failover'
+$script:CC_FAILOVER_STATE = "$env:USERPROFILE\.claude\cpa-failover.state.json"
+
+function Test-CCFailoverGlobalMode {
+    $json = Get-CCSettings
+    if (-not $json -or -not $json.env.ANTHROPIC_BASE_URL) { return $false }
+    return ("$($json.env.ANTHROPIC_BASE_URL)".TrimEnd('/') -eq (Get-CCFailoverBaseUrl).TrimEnd('/'))
+}
+
+function Install-CCFailoverGlobal {
+    if (-not (Start-CCFailoverProxy)) {
+        Write-Host "[cc-failover] proxy is not healthy; not switching settings.json" -ForegroundColor Red
+        return
+    }
+
+    $json = Get-CCSettings
+    if (-not $json) { return }
+
+    $shim = Get-CCFailoverBaseUrl
+    if (-not (Test-CCFailoverGlobalMode)) {
+        @{
+            settingsBaseUrl = "$($json.env.ANTHROPIC_BASE_URL)"
+            installedAt     = (Get-Date).ToString('o')
+        } | ConvertTo-Json | Set-Content $script:CC_FAILOVER_STATE -Encoding UTF8
+
+        $json.env.ANTHROPIC_BASE_URL = $shim
+        Save-CCSettings $json
+        Write-Host "[cc-failover] settings.json ANTHROPIC_BASE_URL -> $shim" -ForegroundColor Green
+    } else {
+        Write-Host "[cc-failover] settings.json already points at $shim" -ForegroundColor Gray
+    }
+
+    $node = Find-CCNodeExe
+    if (-not $node) {
+        Write-Host "[cc-failover] node.exe not found; start the proxy manually after login" -ForegroundColor Yellow
+        return
+    }
+
+    $command = "& '$node' '$script:CC_FAILOVER_SCRIPT'"
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+        -Argument "-NoProfile -WindowStyle Hidden -Command `"$command`"" `
+        -WorkingDirectory "$env:USERPROFILE\.claude"
+    $trigger = New-ScheduledTaskTrigger -AtLogOn
+    $taskSettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
+
+    try {
+        Register-ScheduledTask -TaskName $script:CC_FAILOVER_TASK -Action $action -Trigger $trigger `
+            -Settings $taskSettings -Description 'Keep the cc-switch CPA failover proxy running' -Force | Out-Null
+        Write-Host "[cc-failover] logon task '$($script:CC_FAILOVER_TASK)' registered (auto-restart on crash)" -ForegroundColor Green
+    } catch {
+        Write-Host "[cc-failover] could not register the logon task: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "              Global mode still works now, but will not survive a reboot." -ForegroundColor Yellow
+        Write-Host "              Undo with: cc-failover uninstall" -ForegroundColor Gray
+    }
+}
+
+function Uninstall-CCFailoverGlobal {
+    if (Test-Path $script:CC_FAILOVER_STATE) {
+        try {
+            $state = Get-Content $script:CC_FAILOVER_STATE -Raw | ConvertFrom-Json
+            if ($state.settingsBaseUrl) {
+                $json = Get-CCSettings
+                if ($json) {
+                    $json.env.ANTHROPIC_BASE_URL = "$($state.settingsBaseUrl)"
+                    Save-CCSettings $json
+                    Write-Host "[cc-failover] settings.json ANTHROPIC_BASE_URL -> $($state.settingsBaseUrl)" -ForegroundColor Green
+                }
+            }
+        } catch {
+            Write-Host "[cc-failover] could not restore settings.json: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+        Remove-Item $script:CC_FAILOVER_STATE -ErrorAction SilentlyContinue
+    } else {
+        Write-Host "[cc-failover] no saved state; leaving settings.json untouched" -ForegroundColor Gray
+    }
+
+    Unregister-ScheduledTask -TaskName $script:CC_FAILOVER_TASK -Confirm:$false -ErrorAction SilentlyContinue
+    Stop-CCFailoverProxy | Out-Null
+    Write-Host "[cc-failover] global mode removed; use 'cc' for per-session failover" -ForegroundColor Yellow
+}
+
+function global:cc-failover {
+    <#
+    .SYNOPSIS
+        Inspect or control the runtime failover proxy.
+    .PARAMETER Action
+        status (default) | start | stop | restart | reset | install | uninstall
+    #>
+    param([ValidateSet('status', 'start', 'stop', 'restart', 'reset', 'install', 'uninstall')][string]$Action = 'status')
+
+    switch ($Action) {
+        'install' { Install-CCFailoverGlobal }
+        'uninstall' { Uninstall-CCFailoverGlobal }
+        'start' {
+            if (Start-CCFailoverProxy) {
+                Write-Host "[cc-failover] running at $(Get-CCFailoverBaseUrl)" -ForegroundColor Green
+            } else {
+                Write-Host "[cc-failover] failed to start" -ForegroundColor Red
+            }
+        }
+        'stop' {
+            if (Stop-CCFailoverProxy) { Write-Host "[cc-failover] stopped" -ForegroundColor Yellow }
+            else { Write-Host "[cc-failover] not running" -ForegroundColor Gray }
+        }
+        'restart' {
+            Stop-CCFailoverProxy | Out-Null
+            Start-Sleep -Milliseconds 300
+            if (Start-CCFailoverProxy) { Write-Host "[cc-failover] restarted" -ForegroundColor Green }
+            else { Write-Host "[cc-failover] failed to restart" -ForegroundColor Red }
+        }
+        'reset' {
+            try {
+                Invoke-RestMethod -Method Post -Uri "$(Get-CCFailoverBaseUrl)/__failover/reset" -TimeoutSec 3 | Out-Null
+                Write-Host "[cc-failover] cooldowns cleared" -ForegroundColor Green
+            } catch {
+                Write-Host "[cc-failover] not running" -ForegroundColor Yellow
+            }
+        }
+        'status' {
+            $status = Get-CCFailoverStatus
+            if (-not $status) {
+                Write-Host "[cc-failover] not running (start with: cc-failover start)" -ForegroundColor Yellow
+                return
+            }
+            Write-Host ""
+            Write-Host "=== CPA runtime failover ===" -ForegroundColor Cyan
+            Write-Host "  Proxy    : $(Get-CCFailoverBaseUrl)  (pid $($status.pid), up $($status.uptimeSec)s)" -ForegroundColor Gray
+            $mode = if (Test-CCFailoverGlobalMode) { 'global (settings.json -> proxy)' } else { 'launcher only (cc)' }
+            $task = $null
+            try { $task = Get-ScheduledTask -TaskName $script:CC_FAILOVER_TASK -ErrorAction SilentlyContinue } catch {}
+            $taskState = if ($task) { "$($task.State)" } else { 'not registered' }
+            Write-Host "  Mode     : $mode   logon task: $taskState" -ForegroundColor Gray
+            Write-Host "  Config   : $($status.envFile)" -ForegroundColor Gray
+            Write-Host "  Requests : $($status.stats.requests)   failovers: $($status.stats.failovers)   errors: $($status.stats.errors)" -ForegroundColor Gray
+            foreach ($ep in $status.endpoints) {
+                $color = if ($ep.state -eq 'ready') { 'Green' } else { 'Yellow' }
+                $suffix = if ($ep.state -eq 'cooling') { " (cooling $($ep.downForSec)s, last: $($ep.lastError))" } else { "" }
+                Write-Host "  $($ep.label.PadRight(10)) $($ep.base) [$($ep.state)]$suffix" -ForegroundColor $color
+            }
+            Write-Host ""
+        }
+    }
+}
+
 # === MODEL CATEGORIZATION HELPERS ===
 
 <#
@@ -502,6 +746,25 @@ function Get-CPAModelList {
     return $null
 }
 
+# Active endpoint with a 30s cache. Get-CPActiveEndpoint walks the model-list
+# endpoints; calling it once per Test-ModelHealth would multiply that probe.
+$script:CC_ACTIVE_EP_CACHE = $null
+$script:CC_ACTIVE_EP_TS = [datetime]::MinValue
+
+function Get-CCActiveEndpointCached {
+    param([int]$TtlSec = 30)
+
+    $age = ((Get-Date) - $script:CC_ACTIVE_EP_TS).TotalSeconds
+    if ($script:CC_ACTIVE_EP_CACHE -and $age -lt $TtlSec) { return $script:CC_ACTIVE_EP_CACHE }
+
+    $ep = Get-CPActiveEndpoint -TimeoutSec 8
+    if ($ep) {
+        $script:CC_ACTIVE_EP_CACHE = $ep
+        $script:CC_ACTIVE_EP_TS = Get-Date
+    }
+    return $ep
+}
+
 <#
 .SYNOPSIS
     Ping a single model to verify it's healthy and responding.
@@ -518,12 +781,12 @@ function Test-ModelHealth {
     $cached = Get-CachedHealth -ModelName $ModelName
     if ($null -ne $cached) { return $cached }
 
-    $ep = Resolve-CPAEndpoint
-    $baseUrl = if ($env:ANTHROPIC_BASE_URL) { $env:ANTHROPIC_BASE_URL -replace '/+$', '' } else {
-        $json = Get-CCSettings
-        if ($json -and $json.env.ANTHROPIC_BASE_URL) { $json.env.ANTHROPIC_BASE_URL -replace '/+$', '' } else { $null }
-    }
-    if (-not $baseUrl -or -not $ep.ApiKey) { return $false }
+    # Probe the endpoint that will actually serve the session: primary when it is
+    # alive, otherwise the first CPA_FALLBACK_URLS entry. Cached for 30s so the
+    # ~17 probes of an auto-assign run do not repeat the model-list request.
+    $ep = Get-CCActiveEndpointCached
+    if (-not $ep -or -not $ep.BaseUrl -or -not $ep.ApiKey) { return $false }
+    $baseUrl = $ep.BaseUrl -replace '/+$', ''
 
     $headers = @{
         "Content-Type" = "application/json"
@@ -763,6 +1026,12 @@ function global:cc {
         $assign = Invoke-CCAutoAssign
         if ($assign) {
             Write-Host " [OK]" -ForegroundColor Green
+            $active = Get-CCActiveEndpointCached
+            if ($active -and $active.Label -ne 'primary') {
+                Write-Host ""
+                Write-Host "  [!] Primary CPA unreachable - assignment came from $($active.Label) ($($active.BaseUrl))." -ForegroundColor Yellow
+                Write-Host "      The catalog may differ; run 'cc-sync' after the primary recovers." -ForegroundColor Yellow
+            }
             Write-Host ""
             Write-Host "=== Auto Model Assignment ===" -ForegroundColor Magenta
             Write-Host "  code    → $($assign.code)" -ForegroundColor White
@@ -860,10 +1129,24 @@ function global:cc {
     Write-Host "Launching Claude Code (auth token, --bare)..." -ForegroundColor Cyan
     Write-Host ""
 
+    # Route the session through the local failover proxy when it is available.
+    # Claude Code's settings.json env wins over the inherited environment, so the
+    # override has to travel as --settings (highest precedence), not as $env:*.
+    $launchArgs = @('--bare')
+    if (Start-CCFailoverProxy) {
+        $failoverBase = Get-CCFailoverBaseUrl
+        $override = @{ env = @{ ANTHROPIC_BASE_URL = $failoverBase } } | ConvertTo-Json -Compress -Depth 4
+        $launchArgs += @('--settings', $override)
+        Write-Host "Failover: $failoverBase -> $($env:ANTHROPIC_BASE_URL)" -ForegroundColor DarkGray
+        Write-Host "          (cc-failover status to inspect, cc-failover stop to disable)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "[cc] Runtime failover unavailable; using $($env:ANTHROPIC_BASE_URL) directly" -ForegroundColor Yellow
+    }
+
     # Launch directly - no pipeline/redirect (Claude Code auto-detects non-TTY and switches to --print mode)
     # 503 detection is already covered by the health check above. Stderr goes to terminal naturally.
     try {
-        & $claudeExe --bare
+        & $claudeExe @launchArgs
     } catch {
         Write-Host "Error launching Claude Code: $_" -ForegroundColor Red
     }
@@ -1819,6 +2102,7 @@ function Show-CCMenu {
     Write-Host "  cc                 Auto-discover CPA + this menu" -ForegroundColor White
     Write-Host "  cc-config          View/override task-model assignments" -ForegroundColor White
     Write-Host "  cc-status          Full model inventory" -ForegroundColor White
+    Write-Host "  cc-failover        Runtime failover proxy (status|start|install)" -ForegroundColor White
     Write-Host "  cc-sync            Sync models from CPA" -ForegroundColor White
     Write-Host "    cc-sync -Reassign  Sync + reassign task models" -ForegroundColor Gray
     Write-Host "  cc-test            Test all models for quota/health" -ForegroundColor White

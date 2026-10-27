@@ -33,6 +33,14 @@ if (-not (Test-Path "$env:USERPROFILE\.claude")) {
 Copy-Item "$scriptDir\cc-switch.ps1" "$env:USERPROFILE\.claude\cc-switch.ps1" -Force
 Write-Host "  [OK]  Core script installed" -ForegroundColor Green
 
+# Runtime failover proxy used by `cc` (primary CPA -> CPA_FALLBACK_URLS)
+if (Test-Path "$scriptDir\cpa-failover.js") {
+    Copy-Item "$scriptDir\cpa-failover.js" "$env:USERPROFILE\.claude\cpa-failover.js" -Force
+    Write-Host "  [OK]  Failover proxy installed (cpa-failover.js)" -ForegroundColor Green
+} else {
+    Write-Host "  (!)   cpa-failover.js not found (runtime failover skipped)" -ForegroundColor Yellow
+}
+
 # [2/5] Install Claude Code slash commands + skill packages
 Write-Host ""
 Write-Host "[2/5] Installing Claude Code commands and skills..." -ForegroundColor Yellow
