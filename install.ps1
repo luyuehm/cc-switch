@@ -11,7 +11,7 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Repo release version. VERSION is authoritative — it is bumped at release time
 # to match the new git tag. The literal below is only a fallback for running this
 # script outside a checkout (e.g. `irm ... | iex`); keep it in sync.
-$ccReleaseVersion = "2.5.0"
+$ccReleaseVersion = "2.6.0"
 $ccVersionFile = Join-Path $scriptDir "VERSION"
 if ((Test-Path $ccVersionFile) -and (Test-Path (Join-Path $scriptDir "install.ps1"))) {
     $ccReleaseVersion = (Get-Content $ccVersionFile -Raw).Trim()

@@ -8,9 +8,20 @@ The repo release version lives in [`VERSION`](VERSION) and is bumped at release 
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [v2.6.0] — 2026-10-27
+
+Runtime failover release. Fallback endpoints stop being a probe-only convenience: `cc` now keeps a
+session alive when the primary CPA dies mid-run, and returns to it once it recovers.
+
+### Added
+
 - **Runtime failover proxy (`cpa-failover.js` + `cc-failover`)** — closes the gap left by configurable fallbacks: Claude Code has exactly one `ANTHROPIC_BASE_URL`, so a primary that died mid-session failed outright even when a healthy backup was listed in `CPA_FALLBACK_URLS`. `cc` now starts a localhost proxy (127.0.0.1:18317) and launches Claude Code against it via `--settings`; the proxy buffers requests and replays them on the next endpoint after transport errors, timeouts, 404, 429 or 5xx, cools the failed endpoint down (`CPA_FAILOVER_COOLDOWN_MS`, default 30s), and returns to the primary automatically once it answers again. Streaming responses are piped through unchanged (a break after the first byte cannot be replayed). The proxy forces direct connections because Node 24 honours `NODE_USE_ENV_PROXY`/`HTTP_PROXY` and would route a tailnet backup through Clash, surfacing as a 502. `cc-failover status|start|stop|restart|reset` manage it; `cc-failover install|uninstall` opt into global mode (settings.json + logon task) so a plain `claude` launch also fails over. `Test-ModelHealth` now probes the endpoint that is actually serving (primary, else the first healthy fallback), cached for 30s.
 - **Write guard for fallback endpoints** — `cc-sync` (add / `-Remove`) and `cc-test -RemoveDead` now refuse to run against a non-primary endpoint, because a backup can serve a different model catalog and a sync would add foreign models while deleting models the primary still has. `cc-test -RemoveDead` also refuses when no endpoint answered at all (every probe would fail, wiping the list). `CC_ALLOW_FALLBACK_WRITE=1` overrides the guard. Read-only paths (`cc-sync -List`, `cc-test`) still fall back.
-- **Configurable fallback CPA endpoints** — `CPA_FALLBACK_URLS` (both scripts) and `CPA_FALLBACK_API_KEY` (per-entry `url|key` also works) let read-only commands survive a dead primary endpoint. `Resolve-CPAEndpoints` / `__cc_resolve_fallbacks` normalize `http://host`, `http://host/v1` and `http://host/v1/models` to the same base + models URL pair, and `Invoke-CCModelsRequest` / `__cc_fetch_cpa_models` walk the list. Failover happens on transport failure, timeout and 5xx only — a 4xx is a real answer and is reported rather than masked. `cc-sync` and `cc-test` print which endpoint answered; `cc <model>` still launches against `ANTHROPIC_BASE_URL` unchanged.
+- **Configurable fallback CPA endpoints** — `CPA_FALLBACK_URLS` (both scripts) and `CPA_FALLBACK_API_KEY` (per-entry `url|key` also works) let read-only commands survive a dead primary endpoint. `Resolve-CPAEndpoints` / `__cc_resolve_fallbacks` normalize `http://host`, `http://host/v1` and `http://host/v1/models` to the same base + models URL pair, and `Invoke-CCModelsRequest` / `__cc_fetch_cpa_models` walk the list. Failover happens on transport failure, timeout and 5xx only — a 4xx is a real answer and is reported rather than masked. `cc-sync` and `cc-test` print which endpoint answered; `cc <model>` reaches the backups through the runtime failover proxy below.
 - **`VERSION`** — single source of truth for the repo release version. Both installers read it and print it in their banner, falling back to an embedded literal when run outside a checkout.
 - **`tests/ric-1851-regression.sh`** — macOS regression matrix covering the `a-` ID, settings-persistence and endpoint-resolution fixes below. Runs against a throwaway `HOME` and a local mock of the CPA `/v1/models` endpoint, so it needs no network and never touches the real `~/.claude/settings.json`. 11 checks; the endpoint-resolution checks fail against the previous script.
 
@@ -33,6 +44,7 @@ The repo release version lives in [`VERSION`](VERSION) and is bumped at release 
 
 ### Documentation
 
+- **`README.md`** — new "Runtime failover proxy (`cc-failover`)" subsection: the request path diagram, retry/cool-down semantics, the Node 24 proxy trap, the command table and launcher-vs-global mode.
 - **`README.md`** — new "Fallback CPA endpoints" subsection (list format, per-entry keys, which commands walk the list, the write guard and `CC_ALLOW_FALLBACK_WRITE`) and the two new variables in the Configuration env block.
 - **`README.md`** — versioning note explaining repo release vs per-platform feature set; `VERSION` added to the project tree.
 - **`cc-switch.sh` / `cc-switch.ps1`** — header comments now distinguish the repo release version from the platform feature-set label.

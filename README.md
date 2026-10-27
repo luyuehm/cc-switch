@@ -13,6 +13,7 @@
 - **Hidden Error Body Detection** — `Test-ModelHealth` inspects response body for error indicators even on HTTP 200
 - **Auth Priority** — `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`; `API_KEY` cleared before launch to avoid "Both set" warning
 - **CPA Sync** — Fetch, diff, add/remove models from your CPA proxy
+- **Runtime Failover** — `cc` launches through a localhost proxy that switches to `CPA_FALLBACK_URLS` when the primary CPA dies, and back when it recovers
 - **Skill Menu Management** — Audit, hide/show, preset profiles
 - **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
 - **Shell Startup Troubleshooting** — `/shellfix` skill for pyenv lock residue, `rm` PATH-shim hijack, fpath bloat
@@ -20,7 +21,7 @@
 
 Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch).
 
-**Versioning:** the repo release version lives in [`VERSION`](VERSION) and matches the latest git tag (currently **v2.5.0**). Both installers read it and print it in their banner. The two platform implementations can lag or lead the repo release independently, so each also carries its own *feature set* label — macOS is on feature set **v2.4.0**. See [CHANGELOG.md](CHANGELOG.md).
+**Versioning:** the repo release version lives in [`VERSION`](VERSION) and matches the latest git tag (currently **v2.6.0**). Both installers read it and print it in their banner. The two platform implementations can lag or lead the repo release independently, so each also carries its own *feature set* label — macOS is on feature set **v2.4.0**. See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -879,10 +880,18 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 # Optional: separate endpoint for model list
 # CPA_MODELS_URL=https://your-cpa-proxy.com/v1/models
 
-# Optional: backup endpoints tried when the primary is unreachable (read-only commands).
+# Optional: backup endpoints tried when the primary is unreachable.
 # ';' or ',' separated; host, /v1 or /v1/models all work; add "|key" to pin a key per entry.
+# Read-only commands (cc-sync -List, cc-test) walk this list, and `cc` routes the
+# session through it via the runtime failover proxy.
 # CPA_FALLBACK_URLS=http://your-backup-cpa:3000/v1
 # CPA_FALLBACK_API_KEY=sk-ant-xxx     # for fallbacks without their own key
+
+# Optional: runtime failover proxy tuning (cpa-failover.js)
+# CPA_FAILOVER_PORT=18317                  # localhost port `cc` points Claude Code at
+# CPA_FAILOVER_COOLDOWN_MS=30000           # how long a failed endpoint is skipped
+# CPA_FAILOVER_HEADER_TIMEOUT_MS=90000     # give up on an upstream that never answers
+# CPA_FAILOVER_IDLE_TIMEOUT_MS=600000      # give up on a silent stream
 
 # Optional (Windows/PowerShell): proxy policy for CPA requests
 # CC_PROXY=http://127.0.0.1:7890   # always proxy
@@ -900,7 +909,7 @@ Path: `~/.claude/settings.json`
 | `taskModels` | `cc`, `cc-config` | Task-to-model assignments (code/quick/reason/image/default) |
 | `skillOverrides` | `cc-hide`/`cc-show`/`cc-profile` | Hidden skills control |
 | `env.ANTHROPIC_API_KEY` | `.env` fallback | API key fallback |
-| `env.ANTHROPIC_BASE_URL` | `.env` fallback | Endpoint fallback |
+| `env.ANTHROPIC_BASE_URL` | `.env` fallback | Endpoint fallback (may point at the failover proxy in global mode) |
 | `modelOverrides` | (removed) | ⚠️ 新版 Claude Code 不再支持对象值格式。cc-switch 会在切换时自动清理旧条目。改用 `CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` 替代。 |
 | `env.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT` | `cc <model>` | 抑制 unknown model 上下文窗口警告（所有版本均支持） |
 
@@ -911,7 +920,8 @@ Path: `~/.claude/settings.json`
 ```
 cc-switch/
 ├── cc-switch.sh               # Core: model switch + health check + auto-discovery + menu (bash/zsh, ~1650 lines)
-├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~1516 lines)
+├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~2140 lines)
+├── cpa-failover.js            # Localhost failover proxy: primary CPA -> CPA_FALLBACK_URLS (Node 18+, ~480 lines)
 ├── install.sh                 # macOS installer (bash, 6-step)
 ├── install.ps1                # Windows/pwsh 5-step installer
 ├── profile-backup.ps1         # Reference pwsh profile: prompt engines + utilities
@@ -926,7 +936,7 @@ cc-switch/
 ├── docs/
 │   └── pwsh-usage-guide.md    # PowerShell usage manual (Chinese)
 ├── .claude/
-│   └── settings.local.json    # Claude Code permission overrides
+│   └── settings.local.json    # Claude Code permission overrides (gitignored, per machine)
 └── skills/
     ├── cc-menu/
     │   ├── SKILL.md           # Claude Code skill definition
@@ -955,6 +965,7 @@ cc-switch/
 | `cc-config <task> <model>` | Override task model |
 | `cc-config -Reset` | Re-run CPA auto-discovery |
 | `cc-status` | Full model inventory with task assignments |
+| `cc-failover` | Failover proxy status (also `start`/`stop`/`restart`/`reset`/`install`/`uninstall`) |
 | `cc-sync` | Sync model list from CPA |
 | `cc-sync -Reassign` | Sync + reassign task models |
 | `cc-test` | Test all models for quota/health |

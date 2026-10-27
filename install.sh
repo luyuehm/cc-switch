@@ -13,7 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Repo release version. VERSION is authoritative — it is bumped at release time
 # to match the new git tag. The literal below is only a fallback for running
 # this script outside a checkout (e.g. `curl ... | bash`); keep it in sync.
-CC_RELEASE_VERSION="2.5.0"
+CC_RELEASE_VERSION="2.6.0"
 if [[ -f "$SCRIPT_DIR/VERSION" && -f "$SCRIPT_DIR/install.sh" ]]; then
   CC_RELEASE_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
 fi
