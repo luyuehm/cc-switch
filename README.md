@@ -36,8 +36,8 @@ which exists only in PowerShell.
 | Skill menu (`cc-audit` / `cc-hide` / `cc-profile`) | ✅ | ✅ |
 | Fallback endpoints (`CPA_FALLBACK_URLS`) — read-only probes survive a dead primary | ✅ | ✅ |
 | Write guard against non-primary endpoints (`CC_ALLOW_FALLBACK_WRITE`) | ✅ | ✅ |
+| Oh My Posh theme switching (`cc-theme`) | ✅ | ✅ |
 | **Runtime failover proxy** (mid-session switch, `cc-failover`) | ✅ | ❌ |
-| Oh My Posh theme switching (`cc-theme`) | ✅ | — |
 
 **What the proxy gap means in practice.** `CPA_FALLBACK_URLS` alone only helps *read-only* commands
 (`cc-sync -List`, `cc-test`, model discovery): they can probe a backup when the primary is down.
