@@ -13,7 +13,7 @@
 - **Hidden Error Body Detection** — `Test-ModelHealth` inspects response body for error indicators even on HTTP 200
 - **Auth Priority** — `ANTHROPIC_AUTH_TOKEN` > `ANTHROPIC_API_KEY`; `API_KEY` cleared before launch to avoid "Both set" warning
 - **CPA Sync** — Fetch, diff, add/remove models from your CPA proxy
-- **Runtime Failover** — `cc` launches through a localhost proxy that switches to `CPA_FALLBACK_URLS` when the primary CPA dies, and back when it recovers
+- **Runtime Failover** (PowerShell only) — `cc` launches through a localhost proxy that switches to `CPA_FALLBACK_URLS` when the primary CPA dies, and back when it recovers. macOS gets the fallback *list* (read-only probes survive a dead primary) but not the mid-session proxy — see [Platform support](#platform-support)
 - **Skill Menu Management** — Audit, hide/show, preset profiles
 - **Terminal Enhancements** — Optional Oh My Posh, file icons, smart cd
 - **Shell Startup Troubleshooting** — `/shellfix` skill for pyenv lock residue, `rm` PATH-shim hijack, fpath bloat
@@ -21,7 +21,32 @@
 
 Originally [luyuehm/cc-switch](https://github.com/luyuehm/cc-switch).
 
-**Versioning:** the repo release version lives in [`VERSION`](VERSION) and matches the latest git tag (currently **v2.6.0**). Both installers read it and print it in their banner. The two platform implementations can lag or lead the repo release independently, so each also carries its own *feature set* label — macOS is on feature set **v2.4.0**. See [CHANGELOG.md](CHANGELOG.md).
+**Versioning:** the repo release version lives in [`VERSION`](VERSION) and matches the latest git tag (currently **v2.6.0**). Both installers read it and print it in their banner. The two platform implementations can lag or lead the repo release independently, so each also carries its own *feature set* label — macOS is on feature set **v2.6.0**. See [CHANGELOG.md](CHANGELOG.md).
+
+---
+
+## Platform support
+
+The two implementations are close but not identical. Most of the gap is the runtime failover proxy,
+which exists only in PowerShell.
+
+| Capability | Windows (pwsh) | macOS (bash/zsh) |
+|---|---|---|
+| Model switch, health check, `cc-run`, `cc-config`, `cc-test`, `cc-sync` | ✅ | ✅ |
+| Skill menu (`cc-audit` / `cc-hide` / `cc-profile`) | ✅ | ✅ |
+| Fallback endpoints (`CPA_FALLBACK_URLS`) — read-only probes survive a dead primary | ✅ | ✅ |
+| Write guard against non-primary endpoints (`CC_ALLOW_FALLBACK_WRITE`) | ✅ | ✅ |
+| **Runtime failover proxy** (mid-session switch, `cc-failover`) | ✅ | ❌ |
+| Oh My Posh theme switching (`cc-theme`) | ✅ | — |
+
+**What the proxy gap means in practice.** `CPA_FALLBACK_URLS` alone only helps *read-only* commands
+(`cc-sync -List`, `cc-test`, model discovery): they can probe a backup when the primary is down.
+Claude Code itself accepts exactly one `ANTHROPIC_BASE_URL`, so on macOS a primary that dies
+mid-session still ends the session. On Windows, `cc` starts `cpa-failover.js` on
+`127.0.0.1:18317` and launches Claude Code through it, so the session survives.
+
+**Running from macOS against a flaky primary:** restart with `cc` after the endpoint recovers, or
+point `ANTHROPIC_BASE_URL` at a proxy that does the failing over for you.
 
 ---
 
@@ -65,7 +90,10 @@ The endpoint file stores the target URL and (for remote) API key. Remote keys li
 
 **Security:** `~/.claude/cpa-endpoints.json` is `chmod 600` and lives outside the repo. Never commit real URLs or keys into this repository.
 
-**New in macOS feature set v2.4.0:** Health checks, CPA auto-discovery (`cc` no args), `cc-run` task scheduling, `cc-config`, `cc-test` — now at parity with Windows/PowerShell version.
+**macOS feature set v2.6.0:** Health checks, CPA auto-discovery (`cc` no args), `cc-run` task
+scheduling, `cc-config`, `cc-test`, plus fallback endpoints (`CPA_FALLBACK_URLS`) and the
+non-primary write guard. The one Windows-only capability is the runtime failover proxy — see
+[Platform support](#platform-support).
 
 ## 🪟 Windows / PowerShell (pwsh)
 
@@ -594,7 +622,7 @@ address would hide the misconfiguration.
 | model list for auto-assignment (`cc`, `cc-config -Reset`) | Yes — list only; health probes still target the primary |
 | `cc-sync` (add / `-Remove`) | **No** — a sync writes `availableModels` |
 | `cc-test -RemoveDead` | **No** — removing models is a write |
-| `cc <model>` launch | Indirect — health checks use the live endpoint; `cc` then launches through the runtime failover proxy below |
+| `cc <model>` launch | Indirect — health checks use the live endpoint. Windows additionally launches through the runtime failover proxy below; **macOS has no proxy** |
 
 A backup endpoint can serve a *different* model catalog (a mirror, a different gateway). Syncing
 against it would add models the primary does not have and delete models it still does, so the write
@@ -617,7 +645,12 @@ CC_ALLOW_FALLBACK_WRITE=1 cc-sync -Remove      # bash / zsh
 $env:CC_ALLOW_FALLBACK_WRITE = 1; cc-sync -Remove   # PowerShell
 ```
 
-#### Runtime failover proxy (`cc-failover`)
+#### Runtime failover proxy (`cc-failover`) — PowerShell only
+
+> **Not available on macOS.** `cpa-failover.js` is started by `cc-switch.ps1`; `cc-switch.sh` has
+> no `cc-failover` command and `install.sh` does not ship the script. macOS gets the fallback
+> *list* above, which keeps read-only probes alive but cannot rescue a session that is already
+> running. See [Platform support](#platform-support).
 
 The fallback list above only keeps **read-only probes** alive. Claude Code itself accepts a single
 `ANTHROPIC_BASE_URL`, so a primary that dies mid-session used to kill the session even though a
@@ -643,7 +676,7 @@ Claude Code -> 127.0.0.1:18317 (cpa-failover) -> primary CPA
   `Error: Invalid JSON provided to --settings` (on 5.1 and 7.x, with either `claude.exe` or the npm
   `claude.cmd` shim). Keep passing a path if you wire this up yourself.
 
-| Command | Description |
+| Command (PowerShell only) | Description |
 |---------|-------------|
 | `cc-failover` / `cc-failover status` | Endpoint states, failover counters, logon-task state |
 | `cc-failover start` / `stop` / `restart` | Control the local proxy |
@@ -892,12 +925,13 @@ ANTHROPIC_BASE_URL=https://your-cpa-proxy.com/
 
 # Optional: backup endpoints tried when the primary is unreachable.
 # ';' or ',' separated; host, /v1 or /v1/models all work; add "|key" to pin a key per entry.
-# Read-only commands (cc-sync -List, cc-test) walk this list, and `cc` routes the
-# session through it via the runtime failover proxy.
+# Read-only commands (cc-sync -List, cc-test) walk this list on both platforms.
+# On Windows, `cc` also routes the session through it via the runtime failover proxy;
+# macOS has no proxy, so a running session still ends if the primary dies.
 # CPA_FALLBACK_URLS=http://your-backup-cpa:3000/v1
 # CPA_FALLBACK_API_KEY=sk-ant-xxx     # for fallbacks without their own key
 
-# Optional: runtime failover proxy tuning (cpa-failover.js)
+# Optional (Windows/PowerShell): runtime failover proxy tuning (cpa-failover.js)
 # CPA_FAILOVER_PORT=18317                  # localhost port `cc` points Claude Code at
 # CPA_FAILOVER_COOLDOWN_MS=30000           # how long a failed endpoint is skipped
 # CPA_FAILOVER_HEADER_TIMEOUT_MS=90000     # give up on an upstream that never answers
@@ -931,7 +965,7 @@ Path: `~/.claude/settings.json`
 cc-switch/
 ├── cc-switch.sh               # Core: model switch + health check + auto-discovery + menu (bash/zsh, ~1650 lines)
 ├── cc-switch.ps1              # Core: model switch + auto-discovery + health cache + menu + theme (PowerShell, ~2140 lines)
-├── cpa-failover.js            # Localhost failover proxy: primary CPA -> CPA_FALLBACK_URLS (Node 18+, ~480 lines)
+├── cpa-failover.js            # Localhost failover proxy (Windows only): primary -> CPA_FALLBACK_URLS (Node 18+, ~480 lines)
 ├── install.sh                 # macOS installer (bash, 6-step)
 ├── install.ps1                # Windows/pwsh 5-step installer
 ├── profile-backup.ps1         # Reference pwsh profile: prompt engines + utilities

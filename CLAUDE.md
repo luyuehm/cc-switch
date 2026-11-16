@@ -14,7 +14,9 @@ Single PowerShell file. All functions are `global:` scope for availability after
 
 ### Core Script (`cc-switch.sh`) — ~1650 lines
 
-Single bash/zsh file for macOS. Feature parity with PowerShell version: health checks, CPA auto-discovery, cc-run, cc-config, cc-test. Uses curl for API calls, python3 for JSON manipulation, and in-memory associative arrays for health cache (zsh).
+Single bash/zsh file for macOS. Covers health checks, CPA auto-discovery, cc-run, cc-config, cc-test, syncing, skill menu, and fallback endpoints (`CPA_FALLBACK_URLS` + the `CC_ALLOW_FALLBACK_WRITE` write guard). Uses curl for API calls, python3 for JSON manipulation, and in-memory associative arrays for health cache (zsh).
+
+**Not at parity: the runtime failover proxy.** `cpa-failover.js` and its `cc-failover` command exist only in `cc-switch.ps1` — `cc-switch.sh` has no reference to either, and `install.sh` does not ship the script. macOS therefore has no mid-session endpoint switching; if the primary CPA dies while Claude Code is running, the session ends. Do not document `cc-failover` as a macOS feature.
 
 **Startup chain:**
 1. `__cc_load_env` — reads `~/.claude/cc-switch.env` into process env vars at import time
