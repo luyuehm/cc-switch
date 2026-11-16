@@ -8,9 +8,39 @@ The repo release version lives in [`VERSION`](VERSION) and is bumped at release 
 
 ### Added
 
+- **`README.md` — "Platform support" section.** A capability matrix (Windows vs macOS) with the
+  one real divergence called out: the runtime failover proxy is PowerShell-only. Documents what the
+  gap costs in practice — `CPA_FALLBACK_URLS` keeps *read-only* commands alive on macOS, but a
+  primary that dies mid-session still ends a running session, because Claude Code accepts a single
+  `ANTHROPIC_BASE_URL` and `cc-switch.sh` starts no proxy to sit in front of it.
+
 ### Changed
 
+- **`install.sh` — macOS feature-set label is now a named variable and no longer stale.**
+  `CC_MACOS_FEATURE_SET` is defined once and printed alongside the release version, instead of a
+  `v2.4.0` string hardcoded into the banner. It had drifted three releases behind the macOS script
+  itself, which has shipped fallback endpoints and the write guard since v2.6.0. Fixes the same
+  drift the v2.6.0 banner change was meant to fix but had reintroduced for the feature-set half of
+  the line.
+- **`cc-switch.sh` — header comment states the feature set and names the missing proxy.** It read
+  `v2.4.0 — Health check, …`, which both understated the script and said nothing about the one
+  PowerShell-only capability, inviting the assumption that `cc-failover` exists on macOS.
+- **`README.md` — every mention of the failover proxy is now platform-qualified.** The feature
+  bullet, the `cc <model>` row of the fallback table, the proxy subsection (now headed
+  *PowerShell only* with a warning block), the `cc-failover` command table, the `cpa-failover.js`
+  entry in the project tree, and both `CPA_FALLBACK_URLS` / `CPA_FAILOVER_*` comments in the
+  configuration block.
+- **`CLAUDE.md` — "Feature parity" claim corrected.** It asserted the macOS script was at parity
+  with PowerShell; it is not, and an agent reading that would document `cc-failover` as a macOS
+  command.
+
 ### Fixed
+
+- **`docs/evidence/RIC-1853/` — stale BLOCKED audit annotated as resolved.** The record claimed
+  RIC-1851 was absent from the repository working copy (0 occurrences vs 4 in the runtime file) and
+  left the issue blocked. It has since been resolved on trunk by `fb4e1c5`; all three copies now
+  carry the fix and the regression matrix passes 11/11. The original finding is preserved verbatim
+  with a resolution table appended, so the evidence trail stays honest instead of being deleted.
 
 ## [v2.6.0] — 2026-10-27
 

@@ -1,7 +1,10 @@
 # cc-switch.sh — Claude Code Model Switcher for macOS (zsh/bash)
 # Source: . ./cc-switch.sh   or add to ~/.zshrc
 # https://github.com/luyuehm/cc-switch
-# v2.4.0 — Health check, CPA auto-discovery, cc-run, cc-config, cc-test
+# macOS feature set v2.6.0 — Health check, CPA auto-discovery, cc-run, cc-config,
+# cc-test, fallback endpoints (CPA_FALLBACK_URLS) + non-primary write guard.
+# NOT included: the runtime failover proxy (cpa-failover.js / cc-failover) is
+# PowerShell-only; see README "Platform support".
 
 CC_SETTINGS_PATH="${CC_SETTINGS_PATH:-$HOME/.claude/settings.json}"
 CC_ENV_PATH="${CC_ENV_PATH:-$HOME/.claude/cc-switch.env}"

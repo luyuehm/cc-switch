@@ -13,7 +13,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Repo release version. VERSION is authoritative — it is bumped at release time
 # to match the new git tag. The literal below is only a fallback for running
 # this script outside a checkout (e.g. `curl ... | bash`); keep it in sync.
-CC_RELEASE_VERSION="2.6.0"
+CC_MACOS_FEATURE_SET="2.6.0"
+CC_RELEASE_VERSION="$CC_MACOS_FEATURE_SET"
 if [[ -f "$SCRIPT_DIR/VERSION" && -f "$SCRIPT_DIR/install.sh" ]]; then
   CC_RELEASE_VERSION="$(tr -d '[:space:]' < "$SCRIPT_DIR/VERSION")"
 fi
@@ -22,7 +23,7 @@ echo ""
 echo " ==============================================="
 echo "   cc-switch — Claude Code Model + Menu Manager"
 echo "   macOS Edition"
-echo "   Release v${CC_RELEASE_VERSION} · macOS feature set v2.4.0"
+echo "   Release v${CC_RELEASE_VERSION} · macOS feature set v${CC_MACOS_FEATURE_SET}"
 echo " ==============================================="
 echo ""
 
